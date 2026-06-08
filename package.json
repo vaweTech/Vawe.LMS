@@ -1,0 +1,44 @@
+{
+  "name": "vavepro",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "cross-env NODE_OPTIONS=--openssl-legacy-provider next dev",
+    "build": "cross-env NODE_OPTIONS=--openssl-legacy-provider next build && cross-env NODE_OPTIONS=--openssl-legacy-provider next-sitemap",
+    "start": "cross-env NODE_OPTIONS=--openssl-legacy-provider next start",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx --max-warnings=0",
+    "postbuild": "cross-env NODE_OPTIONS=--openssl-legacy-provider next-sitemap"
+  },
+  "dependencies": {
+    "@heroicons/react": "^2.2.0",
+    "@monaco-editor/react": "^4.7.0",
+    "ajv": "^8.17.1",
+    "cross-env": "^10.1.0",
+    "exceljs": "^4.4.0",
+    "firebase": "^12.1.0",
+    "firebase-admin": "^13.8.0",
+    "framer-motion": "^12.23.12",
+    "jspdf": "^4.2.1",
+    "katex": "^0.16.47",
+    "lucide-react": "^0.525.0",
+    "next": "^16.0.10",
+    "next-sitemap": "^4.2.3",
+    "nodemailer": "^8.0.4",
+    "papaparse": "^5.5.3",
+    "razorpay": "^2.9.6",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-icons": "^5.5.0",
+    "read-excel-file": "^5.7.7",
+    "recharts": "^3.8.1",
+    "zod": "^4.1.9"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.3",
+    "@tailwindcss/postcss": "^4",
+    "baseline-browser-mapping": "^2.9.19",
+    "eslint": "^9.34.0",
+    "eslint-config-next": "15.4.6",
+    "tailwindcss": "^4"
+  }
+}

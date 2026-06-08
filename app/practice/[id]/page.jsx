@@ -1,0 +1,574 @@
+"use client";
+
+import { useParams } from "next/navigation";
+import { useState, useEffect, useRef } from "react";
+import Image from "next/image";
+import { db } from "../../../lib/firebase";
+import { collection, getDocs, doc, getDoc } from "firebase/firestore";
+import CheckAuth from "../../../lib/CheckAuth";
+
+export default function PracticeMCQ() {
+  const { id } = useParams(); // This will be the slug (e.g., "java-programming")
+  const [questions, setQuestions] = useState([]);
+  const [courseTitle, setCourseTitle] = useState("");
+  const [courseId, setCourseId] = useState("");
+  const [selected, setSelected] = useState({});
+  const [showResult, setShowResult] = useState({});
+  const [time, setTime] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [imageErrors, setImageErrors] = useState({});
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [currentSet, setCurrentSet] = useState(0);
+  const [setScores, setSetScores] = useState({});
+  const [setStartTime, setSetStartTime] = useState({});
+  const timerRef = useRef(null);
+  const [showSets, setShowSets] = useState(false);
+  const questionsTopRef = useRef(null);
+
+  const handleSelectSet = (setIndex) => {
+    setCurrentSet(setIndex);
+    setShowSets(false);
+    if (questionsTopRef.current) {
+      questionsTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  // Function to create slug from title for matching
+  const createSlug = (title) => {
+    return title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  };
+
+  // Fetch course title and MCQs from Firestore using subcollection structure
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        setLoading(true);
+        
+        // Get all courses to find the matching course by slug
+        const coursesSnap = await getDocs(collection(db, "courses"));
+        const allCourses = coursesSnap.docs.map(doc => ({
+          id: doc.id,
+          title: doc.data().title,
+          slug: createSlug(doc.data().title)
+        }));
+        
+        // Find course by matching slug
+        const matchingCourse = allCourses.find(course => course.slug === id);
+        
+        if (matchingCourse) {
+          setCourseTitle(matchingCourse.title);
+          setCourseId(matchingCourse.id);
+          
+          // Load MCQs from subcollection: mcqs/{courseId}/questions
+          const questionsRef = collection(db, "mcqs", matchingCourse.id, "questions");
+          const snap = await getDocs(questionsRef);
+          const mcqsData = snap.docs.map((d) => ({ 
+            id: d.id, 
+            ...d.data() 
+          }));
+          
+          console.log(`Fetched ${mcqsData.length} MCQs for course ${matchingCourse.title}`);
+          setQuestions(mcqsData);
+        } else {
+          // If no match found, try using id as courseId directly (backward compatibility)
+          const courseDoc = await getDoc(doc(db, "courses", id));
+          if (courseDoc.exists()) {
+            setCourseTitle(courseDoc.data().title || id);
+            setCourseId(id);
+            
+            const questionsRef = collection(db, "mcqs", id, "questions");
+            const snap = await getDocs(questionsRef);
+            const mcqsData = snap.docs.map((d) => ({ 
+              id: d.id, 
+              ...d.data() 
+            }));
+            
+            console.log(`Fetched ${mcqsData.length} MCQs for course (backward compatibility)`);
+            setQuestions(mcqsData);
+          } else {
+            setCourseTitle("Course not found");
+            console.error("Course not found for slug:", id);
+          }
+        }
+      } catch (error) {
+        console.error("Error fetching data:", error);
+        setCourseTitle(id);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchData();
+  }, [id]);
+
+  // Start timer for current set
+  useEffect(() => {
+    // Initialize timer for current set if it doesn't exist
+    if (!setStartTime[currentSet]) {
+      setSetStartTime(prev => ({
+        ...prev,
+        [currentSet]: Date.now()
+      }));
+      setTime(prev => ({
+        ...prev,
+        [currentSet]: 0
+      }));
+    }
+
+    // Clear previous timer
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+
+    // Start new timer for current set
+    timerRef.current = setInterval(() => {
+      setTime(prev => ({
+        ...prev,
+        [currentSet]: Math.floor((Date.now() - (setStartTime[currentSet] || Date.now())) / 1000)
+      }));
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    };
+  }, [currentSet, setStartTime]);
+
+  const handleSubmitSet = (setIndex) => {
+    setShowResult(prev => ({
+      ...prev,
+      [setIndex]: true
+    }));
+    
+    // Stop timer for this set
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+    
+    // Calculate score for this set
+    const set = questionSets[setIndex];
+    const score = set.questions.filter((question, qIndex) => {
+      // Find the global index of this question
+      const globalIndex = questions.findIndex(q => q.id === question.id);
+      const selectedAnswer = selected[globalIndex];
+      
+      // Handle multiple correct answers
+      const correctAnswers = question?.answers || [question?.answer];
+      
+      // For now, we only check single answer (radio button)
+      // In the future, you can extend this to support multiple selections (checkboxes)
+      return correctAnswers.includes(selectedAnswer);
+    }).length;
+    
+    setSetScores(prev => ({
+      ...prev,
+      [setIndex]: score
+    }));
+  };
+
+  const formatTime = (seconds) => {
+    if (!seconds && seconds !== 0) return "00:00";
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
+
+  // Group questions by category/chapter title
+  const questionSets = [];
+  const categoryMap = {};
+  
+  questions.forEach(question => {
+    const category = question.category || question.chapterTitle || 'Uncategorized';
+    if (!categoryMap[category]) {
+      categoryMap[category] = [];
+    }
+    categoryMap[category].push(question);
+  });
+  
+  // Convert category map to array of sets
+  Object.keys(categoryMap).forEach(category => {
+    questionSets.push({
+      category: category,
+      questions: categoryMap[category]
+    });
+  });
+
+  // Calculate total score across all sets
+  const totalScore = Object.values(setScores).reduce((sum, score) => sum + score, 0);
+  const totalQuestions = questions.length;
+
+  return (
+    <CheckAuth>
+      <div className="min-h-screen bg-gray-100 text-gray-800 p-4 sm:p-6 lg:p-8">
+        {/* Top bar */}
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 sm:mb-8 gap-4">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">{courseTitle} MCQs</h1>
+          <div className="flex items-center gap-3 sm:gap-4">
+            <button
+              type="button"
+              onClick={() => setShowSets(prev => !prev)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 shadow-sm text-sm font-medium transition-colors"
+              title="Open sets"
+            >
+              🗂 <span>{showSets ? 'Hide Sets' : 'Show Sets'}</span>
+            </button>
+            <div className="text-sm font-medium px-3 py-1 rounded-lg border border-blue-200 bg-blue-50 text-blue-800 shadow-sm">
+              ⏱ Set {currentSet + 1}: {formatTime(time[currentSet])}
+            </div>
+          </div>
+        </div>
+
+        {/* Sets Navigation */}
+        <div className="max-w-6xl mx-auto mb-8">
+          {!loading && questionSets.length > 0 && (
+            <div className="bg-white rounded-xl shadow border border-gray-300 p-6">
+              <button
+                type="button"
+                onClick={() => setShowSets(prev => !prev)}
+                className="w-full text-xl font-semibold mb-4 text-center hover:text-blue-700 transition-colors"
+                title="Toggle set list"
+              >
+                Select a Set {showSets ? '▲' : '▼'}
+              </button>
+              {showSets && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {questionSets.map((set, setIndex) => {
+                    const answeredCount = set.questions.filter((question) => {
+                      const globalIndex = questions.findIndex(q => q.id === question.id);
+                      return selected[globalIndex];
+                    }).length;
+                    
+                    const isCompleted = showResult[setIndex];
+                    const score = setScores[setIndex] || 0;
+                    const isActive = currentSet === setIndex;
+                    const setTime = time[setIndex] || 0;
+                    const progress = Math.round((answeredCount / set.questions.length) * 100);
+                    
+                    return (
+                      <button
+                        key={setIndex}
+                        onClick={() => handleSelectSet(setIndex)}
+                        className={`p-4 rounded-xl border-2 transition-all text-left ${
+                          isActive
+                            ? 'border-blue-500 bg-gradient-to-br from-blue-50 to-white text-blue-800 shadow-md'
+                            : isCompleted
+                            ? 'border-green-500 bg-gradient-to-br from-green-50 to-white text-green-800 hover:border-green-600'
+                            : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-semibold leading-tight line-clamp-2">{set.category}</div>
+                            <div className="text-xs text-gray-600 mt-1">{answeredCount}/{set.questions.length} answered</div>
+                          </div>
+                          {isCompleted && (
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">Done</span>
+                          )}
+                        </div>
+                        <div className="mt-3 h-2 w-full rounded-full bg-gray-100 border border-gray-200 overflow-hidden">
+                          <div
+                            className={`${isCompleted ? 'bg-green-500' : 'bg-blue-500'} h-full transition-all`}
+                            style={{ width: `${progress}%` }}
+                          />
+                        </div>
+                        <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
+                          <span>Time: {formatTime(setTime)}</span>
+                          {isCompleted && (
+                            <span className="font-medium text-green-700">Score: {score}/{set.questions.length}</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Questions for Selected Set */}
+        <div className="max-w-4xl mx-auto" ref={questionsTopRef}>
+          {loading && (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+              <p className="mt-4 text-gray-600">Loading questions...</p>
+            </div>
+          )}
+          
+          {!loading && questionSets.length > 0 && (
+            <div className="bg-white rounded-xl shadow border border-gray-300 overflow-hidden">
+              <div className="p-6 space-y-6">
+                {/* Set Header */}
+                <div className="sticky top-0 z-10 bg-white/80 backdrop-blur pb-4 border-b border-gray-200">
+                  <h3 className="text-xl font-semibold text-gray-800 text-center">
+                    {questionSets[currentSet].category} - {questionSets[currentSet].questions.length} Questions
+                  </h3>
+                  <div className="flex justify-center items-center gap-4 mt-2">
+                    <p className="text-sm text-gray-600">
+                      {questionSets[currentSet].questions.filter((question) => {
+                        const globalIndex = questions.findIndex(q => q.id === question.id);
+                        return selected[globalIndex];
+                      }).length}/{questionSets[currentSet].questions.length} answered
+                    </p>
+                    <div className="text-sm font-medium bg-blue-100 text-blue-800 px-2 py-1 rounded shadow-sm">
+                      ⏱ {formatTime(time[currentSet])}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Questions */}
+                {questionSets[currentSet].questions.map((q, localIndex) => {
+                  const globalIndex = questions.findIndex(question => question.id === q.id);
+                  
+                  return (
+                    <div
+                      key={q.id}
+                      className={`p-4 sm:p-6 rounded-xl border ${
+                        showResult[currentSet] ? "bg-gray-50 border-gray-300" : "bg-white border-gray-200"
+                      } shadow-sm`}
+                    >
+                      <h2 className="text-base sm:text-lg font-medium mb-3 sm:mb-4">
+                        {localIndex + 1}. {q.question}
+                      </h2>
+                      
+                      {/* MCQ Description */}
+                      {q.description && q.description.trim() && (
+                        <div className="mb-4 p-3 bg-blue-50 border-l-4 border-blue-400 rounded-r-lg">
+                          <p className="text-sm text-blue-800 leading-relaxed">
+                            <span className="font-medium">Description:</span>
+                          </p>
+                          <div className="text-sm text-blue-800 leading-relaxed mt-1 whitespace-pre-wrap">
+                            {q.description}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {q.questionImage && (
+                        <div className="mb-4">
+                          <Image 
+                            src={q.questionImage} 
+                            alt="Question image"
+                            width={400}
+                            height={192}
+                            className="max-w-full max-h-48 object-contain border rounded cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() => setSelectedImage({ src: q.questionImage, alt: "Question image" })}
+                            onError={(e) => {
+                              console.error("Failed to load question image:", q.questionImage);
+                              setImageErrors(prev => ({ ...prev, [`question-${q.id}`]: true }));
+                            }}
+                            onLoad={() => {
+                              console.log("Question image loaded successfully:", q.questionImage);
+                            }}
+                          />
+                          {imageErrors[`question-${q.id}`] && (
+                            <p className="text-red-500 text-sm mt-1">Failed to load question image</p>
+                          )}
+                          <p className="text-xs text-gray-500 mt-1">Click image to enlarge</p>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        {q.options.map((option, idx) => {
+                          // Handle both old string format and new object format
+                          const optionText = typeof option === 'string' ? option : option.text;
+                          const optionImage = typeof option === 'object' ? option.image : null;
+                          
+                          // Handle multiple correct answers
+                          const correctAnswers = q.answers || [q.answer];
+                          const isCorrect = correctAnswers.includes(optionText);
+                          const isSelected = selected[globalIndex] === optionText;
+
+                          let bgClass = "bg-white border-gray-300 hover:bg-gray-50";
+
+                          if (showResult[currentSet]) {
+                            if (isCorrect) bgClass = "bg-green-200 border-green-400";
+                            if (!isCorrect && isSelected) bgClass = "bg-red-200 border-red-400";
+                          } else if (isSelected) {
+                            bgClass = "bg-blue-50 border-blue-400";
+                          }
+
+                          return (
+                            <label
+                              key={idx}
+                              className={`group block px-3 sm:px-4 py-2 sm:py-3 rounded-lg cursor-pointer border ${bgClass} text-sm sm:text-base ${
+                                showResult[currentSet] ? 'cursor-default' : ''
+                              } shadow-sm transition transform hover:scale-[1.005]`}
+                            >
+                              <input
+                                type="radio"
+                                name={`q${globalIndex}`}
+                                value={optionText}
+                                checked={isSelected}
+                                onChange={() =>
+                                  !showResult[currentSet] &&
+                                  setSelected({ ...selected, [globalIndex]: optionText })
+                                }
+                                className="hidden"
+                                disabled={showResult[currentSet]}
+                              />
+                              <div className="flex items-center gap-3">
+                                <span
+                                  className={`h-5 w-5 inline-flex items-center justify-center rounded-full border mr-1 ${
+                                    showResult[currentSet]
+                                      ? isCorrect
+                                        ? 'border-green-500 bg-green-100'
+                                        : isSelected
+                                        ? 'border-red-500 bg-red-100'
+                                        : 'border-gray-300'
+                                      : isSelected
+                                      ? 'border-blue-500 bg-blue-100'
+                                      : 'border-gray-300'
+                                  }`}
+                                >
+                                  <span className={`h-2.5 w-2.5 rounded-full ${
+                                    showResult[currentSet]
+                                      ? isCorrect
+                                        ? 'bg-green-600'
+                                        : isSelected
+                                        ? 'bg-red-600'
+                                        : 'bg-transparent'
+                                      : isSelected
+                                      ? 'bg-blue-600'
+                                      : 'bg-transparent'
+                                  }`} />
+                                </span>
+                                <span className="flex-1">{optionText}</span>
+                                {optionImage && (
+                                  <Image 
+                                    src={optionImage} 
+                                    alt={`Option ${idx + 1} image`}
+                                    width={96}
+                                    height={64}
+                                    unoptimized={optionImage.includes('cloudinary.com')}
+                                    className="max-w-24 max-h-16 object-contain border rounded cursor-pointer hover:opacity-80 transition-opacity"
+                                    onClick={() => setSelectedImage({ src: optionImage, alt: `Option ${idx + 1} image` })}
+                                    onError={(e) => {
+                                      console.error("Failed to load option image:", optionImage);
+                                      setImageErrors(prev => ({ ...prev, [`option-${q.id}-${idx}`]: true }));
+                                    }}
+                                    onLoad={() => {
+                                      console.log("Option image loaded successfully:", optionImage);
+                                    }}
+                                  />
+                                )}
+                                {imageErrors[`option-${q.id}-${idx}`] && optionImage && (
+                                  <p className="text-red-500 text-xs">Image failed to load</p>
+                                )}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+                
+                {/* Set Submit Button */}
+                {!showResult[currentSet] && (
+                  <div className="text-center mt-6 pt-4 border-t border-gray-200">
+                    <button
+                      onClick={() => handleSubmitSet(currentSet)}
+                      className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg shadow-md text-base"
+                    >
+                      Submit {questionSets[currentSet].category}
+                    </button>
+                  </div>
+                )}
+                
+                {/* Set Result */}
+                {showResult[currentSet] && (
+                  <div className="mt-6 p-4 bg-green-100 text-green-900 rounded-lg shadow-md text-center">
+                    <p className="text-lg font-semibold">✅ {questionSets[currentSet].category} Completed!</p>
+                    <p className="mt-2 text-base">
+                      Score: <span className="font-bold">{setScores[currentSet]}</span> / {questionSets[currentSet].questions.length}
+                    </p>
+                    <p className="mt-1 text-sm text-gray-600">
+                      Time Taken: {formatTime(time[currentSet])}
+                    </p>
+                    {currentSet < questionSets.length - 1 && (
+                      <div className="mt-4">
+                        <button
+                          onClick={() => handleSelectSet(currentSet + 1)}
+                          className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow"
+                        >
+                          Next: {questionSets[currentSet + 1].category}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Overall Progress Summary */}
+          {Object.keys(showResult).length > 0 && (
+            <div className="mt-6 p-6 bg-blue-100 text-blue-900 rounded-lg shadow-md text-center">
+              <p className="text-xl font-semibold">📊 Overall Progress</p>
+              <p className="mt-2 text-base">
+                Total Score: <span className="font-bold">{totalScore}</span> / {totalQuestions}
+              </p>
+              <p className="mt-1 text-base">
+                Sets Completed: {Object.keys(showResult).length} / {questionSets.length}
+              </p>
+              <div className="mt-2 space-y-1">
+                {Object.keys(showResult).map(setIndex => (
+                  <p key={setIndex} className="text-sm">
+                    {questionSets[parseInt(setIndex)]?.category}: {formatTime(time[setIndex])}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!loading && questions.length === 0 && (
+            <p className="text-gray-500 text-center text-sm sm:text-base">
+              No questions available for this subject.
+            </p>
+          )}
+        </div>
+
+        {/* Image Modal */}
+        {selectedImage && (
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
+            onClick={() => setSelectedImage(null)}
+          >
+            <div className="relative max-w-4xl max-h-full">
+              <button
+                onClick={() => setSelectedImage(null)}
+                className="absolute -top-12 right-0 text-white text-2xl font-bold hover:text-gray-300 transition-colors"
+              >
+                ✕
+              </button>
+              <Image
+                src={selectedImage.src}
+                alt={selectedImage.alt}
+                width={800}
+                height={600}
+                unoptimized={selectedImage.src.includes('cloudinary.com')}
+                className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              />
+              <p className="text-white text-center mt-4 text-sm">
+                Click outside to close
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Floating HUD: Show Sets + Timer (always visible while scrolling) */}
+        {!loading && questionSets.length > 0 && (
+          <div className="fixed top-5 right-5 z-40">
+            <div className="text-xs sm:text-sm font-medium px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-800 shadow">
+              ⏱ Set {currentSet + 1}: {formatTime(time[currentSet])}
+            </div>
+          </div>
+        )}
+      </div>
+    </CheckAuth>
+  );
+}
