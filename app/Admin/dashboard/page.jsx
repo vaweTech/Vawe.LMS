@@ -24,9 +24,7 @@ import {
   ChevronRight,
   Search,
   Sparkles,
-  RefreshCw,
 } from "lucide-react";
-import { makeAuthenticatedRequest } from "@/lib/authUtils";
 
 const MODULES = [
   { href: "/Admin/mcqs", icon: ClipboardList, title: "Manage MCQs", description: "Add, edit, and delete multiple-choice questions.", section: "content", color: "blue" },
@@ -91,123 +89,6 @@ function AdminCard({ href, icon: Icon, title, description, color, index }) {
         </div>
       </Link>
     </motion.div>
-  );
-}
-
-function StudentRoleMigrationPanel() {
-  const [status, setStatus] = useState(null);
-  const [statusError, setStatusError] = useState("");
-  const [lastResult, setLastResult] = useState(null);
-  const [busy, setBusy] = useState(false);
-
-  const loadStatus = async () => {
-    try {
-      setStatusError("");
-      const res = await makeAuthenticatedRequest("/api/admin/migrate-student-roles");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load migration status");
-      setStatus(data);
-    } catch (e) {
-      setStatusError(e.message || "Could not load migration status");
-      console.error(e);
-    }
-  };
-
-  useEffect(() => {
-    loadStatus();
-  }, []);
-
-  async function runMigration(dryRun) {
-    if (
-      !dryRun &&
-      !confirm(
-        "Apply role migration for this batch (up to 500 student + 500 internship docs)? Run again until legacy counts are 0."
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setLastResult(null);
-    try {
-      const res = await makeAuthenticatedRequest("/api/admin/migrate-student-roles", {
-        method: "POST",
-        body: JSON.stringify({
-          dryRun,
-          collegeSubdomain: "vawe",
-          limit: 500,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Migration failed");
-      setLastResult(data);
-      await loadStatus();
-    } catch (e) {
-      alert(e.message || "Migration request failed. Sign in as admin/superadmin.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const pendingStudent =
-    status?.pendingLegacyRoles?.student ?? (status?.countsUnavailable ? "?" : "—");
-  const pendingInternship =
-    status?.pendingLegacyRoles?.internship ?? (status?.countsUnavailable ? "?" : "—");
-
-  return (
-    <div className="mb-10 rounded-2xl border border-amber-200 bg-amber-50/80 p-5 sm:p-6">
-      <h2 className="text-sm font-bold uppercase tracking-wider text-amber-900 mb-2">
-        Student role migration
-      </h2>
-      <p className="text-sm text-amber-950/80 mb-4">
-        Converts legacy <code className="text-xs bg-white/60 px-1 rounded">student</code> →{" "}
-        <strong>{status?.targetRoles?.student || "vaweStudent"}</strong> and{" "}
-        <code className="text-xs bg-white/60 px-1 rounded">internship</code> →{" "}
-        <strong>{status?.targetRoles?.internship || "vaweInternship"}</strong>.
-        Pending: {pendingStudent} student, {pendingInternship} internship.
-      </p>
-      {(statusError || status?.countsUnavailable) && (
-        <p className="text-sm text-amber-800 mb-3">
-          {statusError ||
-            "Counts temporarily unavailable (network). Use Refresh or run a dry run to see batch results."}
-        </p>
-      )}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="flex flex-wrap gap-2"
-      >
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => runMigration(true)}
-          className="px-4 py-2 rounded-xl bg-white border border-amber-300 text-sm font-medium text-amber-950 hover:bg-amber-100 disabled:opacity-50"
-        >
-          Dry run
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => runMigration(false)}
-          className="px-4 py-2 rounded-xl bg-amber-700 text-white text-sm font-medium hover:bg-amber-800 disabled:opacity-50"
-        >
-          {busy ? "Running…" : "Apply batch"}
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={loadStatus}
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm text-amber-900 hover:bg-amber-100/80"
-        >
-          <RefreshCw className={`w-4 h-4 ${busy ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
-      </motion.div>
-      {lastResult && (
-        <pre className="mt-4 text-xs overflow-auto max-h-48 p-3 rounded-xl bg-white/70 border border-amber-200 text-slate-800">
-          {JSON.stringify(lastResult, null, 2)}
-        </pre>
-      )}
-    </div>
   );
 }
 
@@ -305,8 +186,6 @@ export default function AdminDashboardPage() {
 
   const canUseDashboard =
     access.isFullAdmin || access.isDataEntry || access.isCollegeAdmin;
-  const canMigrateRoles =
-    access.role === "admin" || access.role === "superadmin";
 
   if (!user || !canUseDashboard) {
     return (
@@ -374,8 +253,6 @@ export default function AdminDashboardPage() {
             {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </p>
         </motion.div>
-
-        {canMigrateRoles && <StudentRoleMigrationPanel />}
 
         {filteredModules.length === 0 && (
           <div className="text-center py-16 rounded-2xl bg-white border border-slate-200">
