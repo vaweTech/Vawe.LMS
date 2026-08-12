@@ -1,12 +1,5 @@
 import { NextResponse } from "next/server";
 
-function isAppDisabled() {
-  const value = String(process.env.APP_DISABLED ?? "")
-    .trim()
-    .toLowerCase();
-  return value === "true" || value === "1" || value === "yes";
-}
-
 function unavailableResponse() {
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -71,18 +64,45 @@ function unavailableResponse() {
   });
 }
 
-export function middleware(_req) {
-  if (isAppDisabled()) {
+/** Paths that stay reachable while the app is disabled (so you can turn it back on). */
+function isAllowlisted(pathname) {
+  if (pathname === "/api/app-status") return true;
+  if (pathname === "/Admin/vawemap" || pathname.startsWith("/Admin/vawemap/")) return true;
+  return false;
+}
+
+async function isAppDisabled(request) {
+  try {
+    const statusUrl = new URL("/api/app-status", request.nextUrl.origin);
+    const res = await fetch(statusUrl, {
+      cache: "no-store",
+      headers: { "x-app-status-check": "1" },
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.disabled);
+  } catch (e) {
+    console.error("middleware app-status check failed:", e);
+    return false;
+  }
+}
+
+export async function middleware(request) {
+  const { pathname } = request.nextUrl;
+
+  if (isAllowlisted(pathname)) {
+    return NextResponse.next();
+  }
+
+  if (await isAppDisabled(request)) {
     return unavailableResponse();
   }
+
   return NextResponse.next();
 }
 
 export const config = {
   matcher: [
-    /*
-     * Match all request paths except static assets / Next internals.
-     */
     "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|xml)$).*)",
   ],
 };

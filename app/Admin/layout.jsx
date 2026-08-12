@@ -53,6 +53,10 @@ function AdminLayoutInner({ children }) {
   const timerRef = useRef(null);
 
   useEffect(() => {
+    // Public confidential map page — no login
+    if (pathname === "/Admin/vawemap" || pathname?.startsWith("/Admin/vawemap/")) {
+      return;
+    }
     if (access.loading) return;
     if (!access.user) {
       router.replace("/auth/login");
