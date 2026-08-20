@@ -1,27 +1,38 @@
 import { NextResponse } from "next/server";
-import admin, { adminDb } from "@/lib/firebaseAdmin";
+import admin, {
+  adminDb,
+  shouldUseFirestoreSdkDirect,
+  readDocumentViaRest,
+  writeDocumentViaRest,
+} from "@/lib/firebaseAdmin";
 
-const isTransientNetworkError = (e) =>
-  e?.code === "ECONNRESET" ||
-  e?.code === "ETIMEDOUT" ||
-  e?.errno === "ECONNRESET" ||
-  (e?.message && /socket hang up|ECONNRESET|ETIMEDOUT/i.test(e.message));
+function isTrainerRole(role) {
+  return role === "trainer" || role === "crtTrainer";
+}
 
-async function withRetry(fn, maxAttempts = 3) {
-  let lastErr;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+async function readUserDoc(uid) {
+  if (shouldUseFirestoreSdkDirect() && adminDb) {
     try {
-      return await fn();
+      const snap = await adminDb.collection("users").doc(uid).get();
+      if (!snap.exists) return null;
+      return snap.data();
     } catch (e) {
-      lastErr = e;
-      if (attempt < maxAttempts && isTransientNetworkError(e)) {
-        await new Promise((r) => setTimeout(r, 400 * attempt));
-        continue;
-      }
-      throw e;
+      console.warn("update-trainer-status SDK read failed, trying REST:", e?.message || e);
     }
   }
-  throw lastErr;
+  return readDocumentViaRest("users", uid);
+}
+
+async function writeUserLock(uid, payload) {
+  if (shouldUseFirestoreSdkDirect() && adminDb) {
+    try {
+      await adminDb.collection("users").doc(uid).set(payload, { merge: true });
+      return;
+    } catch (e) {
+      console.warn("update-trainer-status SDK write failed, trying REST:", e?.message || e);
+    }
+  }
+  await writeDocumentViaRest("users", uid, payload);
 }
 
 export async function PATCH(req) {
@@ -34,38 +45,61 @@ export async function PATCH(req) {
       );
     }
 
-    const userRef = adminDb.collection("users").doc(uid);
-    const userSnap = await withRetry(() => userRef.get());
-    if (!userSnap.exists) {
-      return NextResponse.json({ error: "Trainer not found" }, { status: 404 });
+    let authUser;
+    try {
+      authUser = await admin.auth().getUser(uid);
+    } catch (e) {
+      if (e?.code === "auth/user-not-found") {
+        return NextResponse.json({ error: "Trainer not found" }, { status: 404 });
+      }
+      throw e;
     }
 
-    const data = userSnap.data();
-    if (data?.role !== "trainer" && data?.role !== "crtTrainer") {
-      return NextResponse.json(
-        { error: "User is not a trainer" },
-        { status: 400 }
+    let userData = null;
+    try {
+      userData = await readUserDoc(uid);
+    } catch (e) {
+      console.warn("update-trainer-status: user doc read failed:", e?.message || e);
+    }
+
+    if (userData && !isTrainerRole(userData.role)) {
+      return NextResponse.json({ error: "User is not a trainer" }, { status: 400 });
+    }
+
+    // Complete lock: disable Firebase Auth so this account cannot log in.
+    await admin.auth().updateUser(uid, {
+      disabled: !active,
+    });
+
+    if (!active) {
+      try {
+        await admin.auth().revokeRefreshTokens(uid);
+      } catch (e) {
+        console.error("Failed to revoke trainer sessions:", e);
+      }
+    }
+
+    const payload = {
+      status: active ? "active" : "hold",
+      locked: !active,
+    };
+
+    let firestoreUpdated = true;
+    try {
+      await writeUserLock(uid, payload);
+    } catch (e) {
+      firestoreUpdated = false;
+      console.warn(
+        "update-trainer-status Firestore write failed after Auth lock:",
+        e?.message || e
       );
     }
 
-    // 1) Disable/enable authentication
-    await withRetry(() =>
-      admin.auth().updateUser(uid, {
-        disabled: !active,
-      })
-    );
-
-    // 2) Update Firestore status field
-    await withRetry(() =>
-      userRef.set(
-        {
-          status: active ? "active" : "hold",
-        },
-        { merge: true }
-      )
-    );
-
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      locked: !active,
+      firestoreUpdated,
+    });
   } catch (e) {
     console.error("update-trainer-status error", e);
     return NextResponse.json(
@@ -74,4 +108,3 @@ export async function PATCH(req) {
     );
   }
 }
-

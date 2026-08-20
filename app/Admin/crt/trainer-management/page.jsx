@@ -6,13 +6,17 @@ import { db, firestoreHelpers, isFirebaseConfigured } from "../../../../lib/fire
 import { useRouter } from "next/navigation";
 import { useAdminAccess } from "../../AdminAccessContext";
 import { motion } from "framer-motion";
-import { ArrowLeft, UserCog, UserPlus, X, RefreshCw, Pencil, Trash2 } from "lucide-react";
+import { ArrowLeft, UserCog, UserPlus, X, RefreshCw, Pencil, Trash2, Lock, Unlock } from "lucide-react";
 import { crtTrainerCollectionSegments, crtTrainerDocSegments } from "@/lib/collegeTenantFirestore";
 import { tenantSegments } from "@/lib/tenantPath";
 import { enrichCrtCoursesWithSubjectType } from "@/lib/crtCourseSubjectType";
 
 /** Must match default in /api/create-trainer (Auth + Firestore `trainerPassword`). */
 const DEFAULT_TRAINER_PASSWORD = "VaweTrainer@2025";
+
+function isTrainerLocked(t) {
+  return t?.locked === true || t?.status === "hold" || t?.status === "locked";
+}
 
 function trainerIsOnBatch(batch, trainerId) {
   if (!batch || !trainerId) return false;
@@ -174,6 +178,7 @@ export default function CRTTrainerManagementPage() {
   const [editingTrainer, setEditingTrainer] = useState(null);
   const [editForm, setEditForm] = useState({ name: "", phone: "" });
   const [deletingId, setDeletingId] = useState(null);
+  const [lockingId, setLockingId] = useState(null);
   const [crtPrograms, setCrtPrograms] = useState([]);
   const [crtCourses, setCrtCourses] = useState([]);
   const [selectedProgramId, setSelectedProgramId] = useState("");
@@ -655,6 +660,64 @@ export default function CRTTrainerManagementPage() {
     }
   };
 
+  const handleToggleLock = async (trainer) => {
+    const locked = isTrainerLocked(trainer);
+    const label = trainer.name || trainer.email || "this trainer";
+    if (
+      !window.confirm(
+        locked
+          ? `Unlock "${label}"? They will be able to log in again.`
+          : `Lock "${label}"? They will not be able to log in until unlocked.`
+      )
+    ) {
+      return;
+    }
+    setLockingId(trainer.id);
+    try {
+      const res = await fetch("/api/update-trainer-status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: trainer.id, active: locked }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update lock status");
+
+      const nextLocked = !locked;
+      const nextStatus = locked ? "active" : "hold";
+      setTrainers((prev) =>
+        prev.map((tr) =>
+          tr.id === trainer.id ? { ...tr, locked: nextLocked, status: nextStatus } : tr
+        )
+      );
+
+      if (db) {
+        try {
+          const trainerRef = firestoreHelpers.doc(
+            db,
+            ...crtTrainerDocSegments(collegeSubdomain, trainer.id)
+          );
+          await firestoreHelpers.setDoc(
+            trainerRef,
+            { locked: nextLocked, status: nextStatus },
+            { merge: true }
+          );
+        } catch (docErr) {
+          console.warn("CRT trainer lock saved in Auth, list doc update failed:", docErr);
+        }
+      }
+
+      alert(
+        locked
+          ? "Trainer unlocked. They can log in again."
+          : "Trainer locked. Login is disabled for this account."
+      );
+    } catch (err) {
+      alert(err.message || "Failed to update lock status");
+    } finally {
+      setLockingId(null);
+    }
+  };
+
   const handleDeleteTrainer = async (trainer) => {
     const confirmed = window.confirm(
       "This trainer's account and data will be deleted permanently. Are you sure?"
@@ -908,16 +971,21 @@ export default function CRTTrainerManagementPage() {
                         <th className="p-4 font-semibold text-slate-700">Email</th>
                         <th className="p-4 font-semibold text-slate-700">Password</th>
                         <th className="p-4 font-semibold text-slate-700">Assigned Classes</th>
+                        <th className="p-4 font-semibold text-slate-700">Status</th>
                         <th className="p-4 font-semibold text-slate-700">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {trainers.map((t) => {
                         const isDeleting = deletingId === t.id;
+                        const isLocking = lockingId === t.id;
+                        const locked = isTrainerLocked(t);
                         return (
                           <tr
                             key={t.id}
-                            className="border-b border-slate-100 hover:bg-slate-50/50"
+                            className={`border-b border-slate-100 hover:bg-slate-50/50 ${
+                              locked ? "bg-slate-50 text-slate-500" : ""
+                            }`}
                           >
                             <td className="p-4 text-slate-600">{t.empId || "—"}</td>
                             <td className="p-4 text-slate-900 font-medium">
@@ -975,7 +1043,35 @@ export default function CRTTrainerManagementPage() {
                               )}
                             </td>
                             <td className="p-4">
-                              <div className="flex items-center gap-2">
+                              <span
+                                className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                                  locked
+                                    ? "bg-rose-100 text-rose-700"
+                                    : "bg-emerald-100 text-emerald-700"
+                                }`}
+                              >
+                                {locked ? "Locked" : "Active"}
+                              </span>
+                            </td>
+                            <td className="p-4">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleLock(t)}
+                                  disabled={isLocking || isDeleting}
+                                  className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60 ${
+                                    locked
+                                      ? "bg-emerald-600 hover:bg-emerald-700"
+                                      : "bg-slate-700 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  {locked ? (
+                                    <Unlock className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <Lock className="w-3.5 h-3.5" />
+                                  )}
+                                  {isLocking ? "…" : locked ? "Unlock" : "Lock"}
+                                </button>
                                 <button
                                   type="button"
                                   onClick={() => openEditModal(t)}
@@ -987,7 +1083,7 @@ export default function CRTTrainerManagementPage() {
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteTrainer(t)}
-                                  disabled={isDeleting}
+                                  disabled={isDeleting || isLocking}
                                   className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
@@ -1094,6 +1190,7 @@ export default function CRTTrainerManagementPage() {
                             <option key={t.id} value={t.id}>
                               {t.name || t.email || "Unnamed"}
                               {t.empId ? ` (${t.empId})` : ""}
+                              {isTrainerLocked(t) ? " (Locked)" : ""}
                             </option>
                           ))}
                         </>

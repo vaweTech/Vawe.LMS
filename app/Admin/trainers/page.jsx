@@ -6,6 +6,10 @@ import { collection, getDocs, doc, writeBatch, setDoc, getDoc, deleteField } fro
 import { db } from "../../../lib/firebase";
 import CheckAdminAuth from "@/lib/CheckAdminAuth";
 
+function isTrainerLocked(t) {
+  return t?.locked === true || t?.status === "hold" || t?.status === "locked";
+}
+
 async function getInternshipCourseCopyIds(internshipId) {
   const coursesSnap = await getDocs(
     collection(db, "internships", internshipId, "courses")
@@ -90,6 +94,7 @@ export default function ManageTrainersPage() {
   const [editForm, setEditForm] = useState({ name: "", email: "" });
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
+  const [lockingId, setLockingId] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -191,6 +196,46 @@ export default function ManageTrainersPage() {
     }
   }
 
+  async function handleToggleLock(t) {
+    const locked = isTrainerLocked(t);
+    const label = t.name || t.email || "this trainer";
+    if (
+      !confirm(
+        locked
+          ? `Unlock "${label}"? They will be able to log in again.`
+          : `Lock "${label}"? They will not be able to log in until unlocked.`
+      )
+    ) {
+      return;
+    }
+    setLockingId(t.id);
+    try {
+      const res = await fetch("/api/update-trainer-status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: t.id, active: locked }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to update lock status");
+      setTrainers((prev) =>
+        prev.map((tr) =>
+          tr.id === t.id
+            ? { ...tr, locked: !locked, status: locked ? "active" : "hold" }
+            : tr
+        )
+      );
+      alert(
+        locked
+          ? "Trainer unlocked. They can log in again."
+          : "Trainer locked. Login is disabled for this account."
+      );
+    } catch (err) {
+      alert(err.message || "Failed to update lock status");
+    } finally {
+      setLockingId(null);
+    }
+  }
+
   async function handleDeleteTrainer(t) {
     if (!confirm(`Delete trainer "${t.name || t.email}"? This cannot be undone.`)) return;
     setDeletingId(t.id);
@@ -255,7 +300,9 @@ export default function ManageTrainersPage() {
           >
             <option value="">Choose…</option>
             {trainers.map((t) => (
-              <option key={t.id} value={t.id}>{t.name || t.email}</option>
+              <option key={t.id} value={t.id}>
+                {t.name || t.email}{isTrainerLocked(t) ? " (Locked)" : ""}
+              </option>
             ))}
           </select>
         </div>
@@ -331,6 +378,7 @@ export default function ManageTrainersPage() {
                   <th className="p-2 border text-left">Classes</th>
                   <th className="p-2 border text-left">Courses</th>
                   <th className="p-2 border text-left">Internships</th>
+                  <th className="p-2 border text-left">Status</th>
                   <th className="p-2 border text-left">Actions</th>
                 </tr>
               </thead>
@@ -352,8 +400,10 @@ export default function ManageTrainersPage() {
                     .filter(Boolean)
                     .join(', ');
                   const isDeleting = deletingId === t.id;
+                  const isLocking = lockingId === t.id;
+                  const locked = isTrainerLocked(t);
                   return (
-                    <tr key={t.id} className="border-t">
+                    <tr key={t.id} className={`border-t ${locked ? "bg-gray-50 text-gray-500" : ""}`}>
                       <td className="p-2 border">{t.name || '-'}</td>
                       <td className="p-2 border">{t.email || '-'}</td>
                       <td className="p-2 border font-mono text-xs">{t.trainerPassword || "VaweTrainer@2025"}</td>
@@ -361,7 +411,28 @@ export default function ManageTrainersPage() {
                       <td className="p-2 border">{courseNames || '-'}</td>
                       <td className="p-2 border">{internshipNames || '-'}</td>
                       <td className="p-2 border">
-                        <div className="flex gap-2">
+                        <span
+                          className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                            locked ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+                          }`}
+                        >
+                          {locked ? "Locked" : "Active"}
+                        </span>
+                      </td>
+                      <td className="p-2 border">
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleLock(t)}
+                            disabled={isLocking || isDeleting}
+                            className={`px-2 py-1 rounded text-white text-xs disabled:opacity-50 ${
+                              locked
+                                ? "bg-emerald-600 hover:bg-emerald-700"
+                                : "bg-slate-700 hover:bg-slate-800"
+                            }`}
+                          >
+                            {isLocking ? "…" : locked ? "Unlock" : "Lock"}
+                          </button>
                           <button
                             type="button"
                             onClick={() => openEdit(t)}
@@ -372,7 +443,7 @@ export default function ManageTrainersPage() {
                           <button
                             type="button"
                             onClick={() => handleDeleteTrainer(t)}
-                            disabled={isDeleting}
+                            disabled={isDeleting || isLocking}
                             className="px-2 py-1 rounded bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs"
                           >
                             {isDeleting ? "…" : "Delete"}
