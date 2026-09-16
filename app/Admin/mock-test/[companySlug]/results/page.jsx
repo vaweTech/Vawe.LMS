@@ -8,14 +8,17 @@ import CheckAdminAuth from "@/lib/CheckAdminAuth";
 import {
   fetchMockTestGroup,
   fetchMockTestGroupSubmissions,
-  getMockQuestionSubSection,
+  deleteMockTestResultsForCandidate,
+  deleteMockTestSubmission,
   getMockTestCompanyLabel,
 } from "@/lib/mockTests";
+import { ResultsPageSkeleton } from "@/components/PageSkeleton";
 import {
   ArrowLeft,
   BarChart3,
   Download,
   Search,
+  Trash2,
   Trophy,
   Users,
   X,
@@ -66,82 +69,6 @@ function avg(nums) {
   return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
-const DUMMY_PEOPLE = [
-  { name: "Ananya Reddy", email: "ananya.reddy@localhost", skill: 0.92 },
-  { name: "Rahul Sharma", email: "rahul.sharma@localhost", skill: 0.78 },
-  { name: "Priya Nair", email: "priya.nair@localhost", skill: 0.64 },
-  { name: "Vikram Patel", email: "vikram.patel@localhost", skill: 0.51 },
-  { name: "Sneha Iyer", email: "sneha.iyer@localhost", skill: 0.38 },
-  { name: "Arjun Rao", email: "arjun.rao@localhost", skill: 0.85 },
-  { name: "Meera Joshi", email: "meera.joshi@localhost", skill: 0.71 },
-  { name: "Karthik Das", email: "karthik.das@localhost", skill: 0.44 },
-  { name: "Divya Menon", email: "divya.menon@localhost", skill: 0.29 },
-  { name: "Sanjay Kumar", email: "sanjay.kumar@localhost", skill: 0.58 },
-  { name: "Lakshmi Pillai", email: "lakshmi.pillai@localhost", skill: 0.81 },
-  { name: "Nikhil Verma", email: "nikhil.verma@localhost", skill: 0.22 },
-];
-
-function dummyHoursAgo(hours) {
-  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-}
-
-function buildDummyBreakdown(questions, skill, seed) {
-  if (!questions.length) {
-    return [
-      { i: 0, type: "mcq", section: "Aptitude", subSection: "", correct: skill > 0.4, unanswered: skill < 0.25 },
-      { i: 1, type: "mcq", section: "Aptitude", subSection: "", correct: skill > 0.35, unanswered: false },
-      { i: 2, type: "mcq", section: "Reasoning", subSection: "", correct: skill > 0.55, unanswered: false },
-      { i: 3, type: "mcq", section: "Reasoning", subSection: "", correct: skill > 0.5, unanswered: false },
-      { i: 4, type: "mcq", section: "English", subSection: "", correct: skill > 0.6, unanswered: skill < 0.3 },
-      { i: 5, type: "mcq", section: "English", subSection: "", correct: skill > 0.45, unanswered: false },
-      { i: 6, type: "mcq", section: "Technical", subSection: "", correct: skill > 0.7, unanswered: false },
-      { i: 7, type: "mcq", section: "Technical", subSection: "", correct: skill > 0.65, unanswered: false },
-      {
-        i: 8,
-        type: "coding",
-        section: "Coding",
-        subSection: "",
-        passed: skill > 0.75 ? 3 : skill > 0.5 ? 2 : skill > 0.3 ? 1 : 0,
-        totalCases: 3,
-        score: Math.round(10 * Math.max(0.1, skill)),
-        maxScore: 10,
-        attempted: skill > 0.2,
-      },
-    ];
-  }
-
-  return questions.map((q, i) => {
-    const section = String(q?.section || "").trim() || "General";
-    const roll = (seed * 17 + i * 13) % 100;
-    if (q?.type === "coding") {
-      const maxScore = Number(q.maxScore) || 10;
-      const totalCases = Array.isArray(q.testCases) ? q.testCases.length || 3 : 3;
-      const passed = Math.min(totalCases, Math.round(totalCases * skill));
-      return {
-        i,
-        type: "coding",
-        section,
-        subSection: getMockQuestionSubSection(q),
-        passed,
-        totalCases,
-        score: Math.round(maxScore * (passed / totalCases)),
-        maxScore,
-        attempted: skill > 0.2,
-      };
-    }
-    const unanswered = roll < (1 - skill) * 18;
-    const correct = !unanswered && roll < skill * 100;
-    return {
-      i,
-      type: "mcq",
-      section,
-      subSection: getMockQuestionSubSection(q),
-      correct,
-      unanswered,
-    };
-  });
-}
-
 function sectionScoresForRow(row) {
   const map = {};
   (row?.questionBreakdown || []).forEach((q) => {
@@ -172,54 +99,6 @@ function formatSectionScore(s) {
   return pct == null ? parts.join(" · ") : `${parts.join(" · ")} (${pct}%)`;
 }
 
-function scoresFromBreakdown(breakdown) {
-  const mcqItems = breakdown.filter((q) => q.type === "mcq");
-  const codingItems = breakdown.filter((q) => q.type === "coding");
-  const mcqCorrect = mcqItems.filter((q) => q.correct).length;
-  const mcqTotal = mcqItems.length;
-  const codingScore = codingItems.reduce((s, q) => s + (Number(q.score) || 0), 0);
-  const codingMax = codingItems.reduce((s, q) => s + (Number(q.maxScore) || 0), 0);
-  const earned = mcqCorrect + codingScore;
-  const max = mcqTotal + codingMax;
-  return {
-    mcqCorrect,
-    mcqTotal: mcqTotal || 10,
-    codingScore,
-    codingMax: codingMax || 10,
-    percent: max > 0 ? Math.round((earned / max) * 100) : Math.round(50 + Math.random() * 30),
-  };
-}
-
-function buildDummySubmissions(tests, testFilter) {
-  const targetTests =
-    testFilter !== "all" && tests.find((t) => t.id === testFilter)
-      ? [tests.find((t) => t.id === testFilter)]
-      : tests.length
-        ? tests
-        : [{ id: "dummy-test", title: "Sample Mock Test", questions: [] }];
-
-  return DUMMY_PEOPLE.flatMap((person, personIndex) =>
-    targetTests.map((test, testIndex) => {
-      const questions = Array.isArray(test.questions) ? test.questions : [];
-      const skill = Math.max(0.12, Math.min(0.98, person.skill + (testIndex % 2 === 0 ? 0 : -0.08)));
-      const breakdown = buildDummyBreakdown(questions, skill, personIndex + 1);
-      const scores = scoresFromBreakdown(breakdown);
-      return {
-        id: `dummy-${personIndex}-${test.id}`,
-        userId: `dummy-${personIndex}`,
-        name: person.name,
-        email: person.email,
-        testId: test.id,
-        testTitle: test.title || test.id,
-        ...scores,
-        submittedAt: dummyHoursAgo(personIndex * 5 + testIndex * 2 + 1),
-        questionBreakdown: breakdown,
-        isDummy: true,
-      };
-    })
-  );
-}
-
 function ResultsInner() {
   const { companySlug } = useParams();
   const searchParams = useSearchParams();
@@ -233,7 +112,7 @@ function ResultsInner() {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("recent");
   const [detail, setDetail] = useState(null);
-  const [showDummy, setShowDummy] = useState(false);
+  const [deletingKey, setDeletingKey] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -262,14 +141,13 @@ function ResultsInner() {
 
   const rows = useMemo(() => {
     let list = submissions;
-    if (showDummy) {
-      list = [...buildDummySubmissions(tests, testFilter), ...list];
-    }
     if (testFilter !== "all") list = list.filter((s) => s.testId === testFilter);
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((s) =>
-        [s.name, s.email, s.testTitle].some((v) => String(v || "").toLowerCase().includes(q))
+        [s.name, s.email, s.testTitle, s.userId, s.id].some((v) =>
+          String(v || "").toLowerCase().includes(q)
+        )
       );
     }
     const sorted = [...list];
@@ -280,7 +158,7 @@ function ResultsInner() {
       return String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
     });
     return sorted;
-  }, [submissions, testFilter, search, sortBy, showDummy, tests]);
+  }, [submissions, testFilter, search, sortBy]);
 
   const sectionColumns = useMemo(() => {
     const names = new Set();
@@ -452,6 +330,67 @@ function ResultsInner() {
     URL.revokeObjectURL(url);
   }
 
+  function candidateLabel(row) {
+    return row?.name || row?.email || row?.userId || "this candidate";
+  }
+
+  async function handleDeleteAttempt(row, e) {
+    e?.stopPropagation?.();
+    const testId = row?.testId;
+    const submissionId = row?.id || row?.userId;
+    if (!testId || !submissionId) {
+      alert("Cannot delete this result.");
+      return;
+    }
+    const ok = confirm(
+      `Delete this result for ${candidateLabel(row)} on "${row.testTitle || testId}"?`
+    );
+    if (!ok) return;
+    const key = `${testId}-${submissionId}`;
+    setDeletingKey(key);
+    try {
+      await deleteMockTestSubmission(companySlug, testId, submissionId);
+      setSubmissions((prev) =>
+        prev.filter((s) => !(s.testId === testId && (s.id === submissionId || s.userId === submissionId)))
+      );
+      if (detail && detail.testId === testId && (detail.id === submissionId || detail.userId === submissionId)) {
+        setDetail(null);
+      }
+    } catch (err) {
+      alert(err?.message || "Failed to delete result.");
+    } finally {
+      setDeletingKey("");
+    }
+  }
+
+  async function handleDeleteCandidate(row, e) {
+    e?.stopPropagation?.();
+    const ok = confirm(
+      `Delete ALL mock-test results for ${candidateLabel(row)} in this group?`
+    );
+    if (!ok) return;
+    const key = `all-${row.userId || row.email || row.id}`;
+    setDeletingKey(key);
+    try {
+      const count = await deleteMockTestResultsForCandidate(companySlug, row);
+      const userId = String(row.userId || row.id || "").trim();
+      const email = String(row.email || "").trim().toLowerCase();
+      setSubmissions((prev) =>
+        prev.filter((s) => {
+          if (userId && (s.userId === userId || s.id === userId)) return false;
+          if (email && String(s.email || "").trim().toLowerCase() === email) return false;
+          return true;
+        })
+      );
+      setDetail(null);
+      alert(count ? `Deleted ${count} result(s).` : "No results found to delete.");
+    } catch (err) {
+      alert(err?.message || "Failed to delete candidate results.");
+    } finally {
+      setDeletingKey("");
+    }
+  }
+
   const selectedTest = tests.find((t) => t.id === testFilter);
 
   return (
@@ -502,14 +441,24 @@ function ResultsInner() {
               </option>
             ))}
           </select>
-          <div className="relative flex-1 min-w-[200px]">
+          <div className="relative flex-1 min-w-[220px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search name or email"
-              className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm"
+              placeholder="Search by name, email, or test"
+              className="w-full border rounded-lg pl-9 pr-9 py-2 text-sm bg-white"
             />
+            {search ? (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-slate-700"
+                title="Clear search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            ) : null}
           </div>
           <select
             value={sortBy}
@@ -521,21 +470,17 @@ function ResultsInner() {
             <option value="scoreAsc">Lowest score</option>
             <option value="name">Name A–Z</option>
           </select>
-          <label className="inline-flex items-center gap-2 text-sm text-slate-700 bg-white border rounded-lg px-3 py-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showDummy}
-              onChange={(e) => setShowDummy(e.target.checked)}
-            />
-            Show dummy preview
-          </label>
         </div>
 
         {loading ? (
-          <div className="p-8 text-center text-slate-500 bg-white rounded-2xl border">Loading results…</div>
-        ) : rows.length === 0 ? (
+          <ResultsPageSkeleton />
+        ) : submissions.length === 0 ? (
           <div className="p-8 text-center text-slate-500 bg-white rounded-2xl border">
             No submissions yet. Results appear after a student finishes and submits.
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="p-8 text-center text-slate-500 bg-white rounded-2xl border">
+            No results match “{search || "this filter"}”.
           </div>
         ) : (
           <>
@@ -559,8 +504,8 @@ function ResultsInner() {
             <div className="grid lg:grid-cols-2 gap-4 mb-6">
               <div className="bg-white rounded-2xl border border-slate-200 p-4">
                 <h2 className="font-semibold text-slate-900 mb-3">Score distribution</h2>
-                <div className="h-56">
-                  <ResponsiveContainer width="100%" height="100%">
+                <div className="h-[224px] w-full min-w-0">
+                  <ResponsiveContainer width="100%" height={224} minWidth={0} minHeight={0}>
                     <BarChart data={distribution}>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 12 }} />
@@ -680,18 +625,23 @@ function ResultsInner() {
                       <th className="px-4 py-3 font-semibold">Coding</th>
                       <th className="px-4 py-3 font-semibold">Score</th>
                       <th className="px-4 py-3 font-semibold">Submitted</th>
+                      <th className="px-4 py-3 font-semibold text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rows.map((row) => {
                       const bySection = sectionScoresForRow(row);
+                      const submissionId = row.id || row.userId;
+                      const rowKey = `${row.testId}-${submissionId}`;
                       return (
                       <tr
-                        key={`${row.testId}-${row.id}`}
+                        key={rowKey}
                         className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
                         onClick={() => setDetail(row)}
                       >
-                        <td className="px-4 py-3 font-medium text-slate-900">{row.name || "—"}</td>
+                        <td className="px-4 py-3 font-medium text-slate-900">
+                          {row.name || "—"}
+                        </td>
                         <td className="px-4 py-3 text-slate-600">{row.email || "—"}</td>
                         <td className="px-4 py-3 text-slate-700">{row.testTitle || row.testId}</td>
                         {sectionColumns.map((section) => (
@@ -711,13 +661,26 @@ function ResultsInner() {
                           <ScoreBadge value={row.percent} />
                         </td>
                         <td className="px-4 py-3 text-slate-600">{formatSubmittedAt(row.submittedAt)}</td>
+                        <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            title="Delete this result"
+                            disabled={!!deletingKey}
+                            onClick={(e) => handleDeleteAttempt(row, e)}
+                            className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </td>
                       </tr>
                       );
                     })}
                   </tbody>
                 </table>
               </div>
-              <p className="px-5 py-3 text-xs text-slate-500">Click a row to see question-level detail.</p>
+              <p className="px-5 py-3 text-xs text-slate-500">
+                Click a row for question-level detail. Use the trash icon to delete that candidate’s result.
+              </p>
             </div>
           </>
         )}
@@ -791,6 +754,26 @@ function ResultsInner() {
                   Question-level detail is available for attempts submitted after this analytics update.
                 </p>
               )}
+              <div className="pt-2 flex flex-wrap gap-2 border-t">
+                <button
+                  type="button"
+                  disabled={!!deletingKey}
+                  onClick={(e) => handleDeleteAttempt(detail, e)}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-200 text-red-600 text-sm hover:bg-red-50 disabled:opacity-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete this result
+                </button>
+                <button
+                  type="button"
+                  disabled={!!deletingKey}
+                  onClick={(e) => handleDeleteCandidate(detail, e)}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-200 text-red-700 text-sm hover:bg-red-50 disabled:opacity-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete all for this candidate
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -802,7 +785,7 @@ function ResultsInner() {
 export default function AdminMockTestResultsPage() {
   return (
     <CheckAdminAuth>
-      <Suspense fallback={<div className="p-8 text-center text-slate-500">Loading results…</div>}>
+      <Suspense fallback={<div className="min-h-screen bg-slate-50 p-6"><ResultsPageSkeleton /></div>}>
         <ResultsInner />
       </Suspense>
     </CheckAdminAuth>

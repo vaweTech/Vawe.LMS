@@ -21,6 +21,7 @@ import {
   transformMockCompilerInput,
 } from "@/lib/mockTests";
 import { useSecureExamSession } from "@/lib/useSecureExamSession";
+import { ExamPageSkeleton } from "@/components/PageSkeleton";
 
 function SecureExamOverlays({
   started,
@@ -559,7 +560,7 @@ export default function TakeMockTestPage() {
   if (loading) {
     return (
       <CheckAuth>
-        <div className="min-h-dvh flex items-center justify-center bg-gray-100">Loading...</div>
+        <ExamPageSkeleton />
       </CheckAuth>
     );
   }

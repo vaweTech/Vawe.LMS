@@ -25,6 +25,7 @@ import {
   updateMockTestGroup,
 } from "@/lib/mockTests";
 import { parseDayMcqRows } from "@/lib/dayMcqUpload";
+import { ListRowSkeleton, StatsSkeleton } from "@/components/PageSkeleton";
 import {
   ArrowLeft,
   Clock,
@@ -35,6 +36,7 @@ import {
   Pencil,
   Plus,
   Save,
+  Settings2,
   Trash2,
   Unlock,
   Upload,
@@ -981,46 +983,46 @@ export default function AdminMockTestCompanyPage() {
                 Back to groups
               </Link>
 
-              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
-                <div className="flex items-start gap-3">
-                  <div className="h-12 w-12 rounded-2xl bg-[#00448a] text-white flex items-center justify-center shrink-0 shadow-lg shadow-[#00448a]/20">
-                    <ListChecks className="h-6 w-6" />
+              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-5">
+                <div className="flex items-start gap-3 min-w-0">
+                  <div className="h-11 w-11 rounded-2xl bg-[#00448a] text-white flex items-center justify-center shrink-0 shadow-lg shadow-[#00448a]/20">
+                    <ListChecks className="h-5 w-5" />
                   </div>
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-[#00448a]/70">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-[#00448a]/70">
                       Mock test group
                     </p>
-                    <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">{companyLabel}</h1>
-                    <p className="text-sm text-slate-600 mt-1">
+                    <h1 className="text-xl md:text-2xl font-bold text-slate-900 truncate">{companyLabel}</h1>
+                    <p className="text-xs md:text-sm text-slate-600 mt-0.5">
                       Manage tests, sections, and questions for this company.
                     </p>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={handleToggleAllLocks}
                     disabled={lockingAll || tests.length === 0}
-                    className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
+                    className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
                       allTestsLocked
                         ? "bg-emerald-600 hover:bg-emerald-700"
                         : "bg-slate-700 hover:bg-slate-800"
                     }`}
                   >
                     {allTestsLocked ? <Unlock className="h-4 w-4" /> : <Lock className="h-4 w-4" />}
-                    {lockingAll ? "…" : allTestsLocked ? "Unlock all tests" : "Lock all tests"}
+                    {lockingAll ? "…" : allTestsLocked ? "Unlock all" : "Lock all"}
                   </button>
                   <Link
                     href={`/Admin/mock-test/${companySlug}/results`}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-800 hover:bg-slate-50"
+                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-800 hover:bg-slate-50"
                   >
                     <Users className="h-4 w-4" />
-                    Test Results
+                    <span className="hidden sm:inline">Results</span>
                   </Link>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5 md:mb-6">
                 {[
                   { label: "Tests", value: pageStats.total, icon: ListChecks, tone: "bg-[#00448a]/10 text-[#00448a]" },
                   { label: "MCQ", value: pageStats.mcq, icon: FileQuestion, tone: "bg-blue-50 text-blue-700" },
@@ -1047,59 +1049,57 @@ export default function AdminMockTestCompanyPage() {
                 ))}
               </div>
 
-              <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
+              <div className="grid gap-5 xl:grid-cols-[260px_1fr] xl:items-start">
                 <form
                   onSubmit={handleCreateTest}
-                  className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 h-fit lg:sticky lg:top-6"
+                  className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5 xl:sticky xl:top-6"
                 >
-                  <h2 className="font-semibold text-slate-900 mb-1">New mock test</h2>
-                  <p className="text-xs text-slate-500 mb-4">Add a test, then open it to add questions.</p>
-                  <div className="space-y-3">
+                  <h2 className="font-semibold text-slate-900 mb-0.5">New mock test</h2>
+                  <p className="text-xs text-slate-500 mb-3">Add a test, then open it to add questions.</p>
+                  <div className="grid grid-cols-1 md:grid-cols-[1fr_88px_88px_auto] xl:grid-cols-1 gap-3 items-end">
                     <div>
                       <label className="block text-xs font-medium text-slate-600 mb-1">Title</label>
                       <input
                         value={testForm.title}
                         onChange={(e) => setTestForm((p) => ({ ...p, title: e.target.value }))}
                         placeholder="Mock Test 1"
-                        className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">Order</label>
-                        <input
-                          type="number"
-                          value={testForm.order}
-                          onChange={(e) =>
-                            setTestForm((p) => ({ ...p, order: Number(e.target.value) || 1 }))
-                          }
-                          className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">Minutes</label>
-                        <input
-                          type="number"
-                          value={testForm.durationMinutes}
-                          onChange={(e) =>
-                            setTestForm((p) => ({
-                              ...p,
-                              durationMinutes: Number(e.target.value) || 60,
-                            }))
-                          }
-                          className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
-                        />
-                      </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Order</label>
+                      <input
+                        type="number"
+                        value={testForm.order}
+                        onChange={(e) =>
+                          setTestForm((p) => ({ ...p, order: Number(e.target.value) || 1 }))
+                        }
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                      />
                     </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Minutes</label>
+                      <input
+                        type="number"
+                        value={testForm.durationMinutes}
+                        onChange={(e) =>
+                          setTestForm((p) => ({
+                            ...p,
+                            durationMinutes: Number(e.target.value) || 60,
+                          }))
+                        }
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={saving}
+                      className="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] disabled:opacity-60 text-sm font-semibold shadow-sm xl:w-full"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Create
+                    </button>
                   </div>
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="mt-4 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] disabled:opacity-60 text-sm font-semibold shadow-sm"
-                  >
-                    <Plus className="h-4 w-4" />
-                    Create test
-                  </button>
                 </form>
 
                 <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1111,7 +1111,7 @@ export default function AdminMockTestCompanyPage() {
                   </div>
 
                   {loading ? (
-                    <div className="p-10 text-center text-slate-500">Loading tests…</div>
+                    <ListRowSkeleton count={4} />
                   ) : tests.length === 0 ? (
                     <div className="p-10 text-center">
                       <p className="text-slate-600 font-medium">No mock tests yet</p>
@@ -1188,65 +1188,55 @@ export default function AdminMockTestCompanyPage() {
                         return (
                           <div
                             key={test.id}
-                            className="p-5 hover:bg-slate-50/50 transition-colors group"
+                            className="px-4 md:px-5 py-3.5 hover:bg-slate-50/50 transition-colors"
                           >
-                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                              <div className="flex items-start gap-3 min-w-0">
-                                <div className="h-10 w-10 rounded-xl bg-[#00448a]/10 text-[#00448a] flex items-center justify-center font-bold text-sm shrink-0">
-                                  {index + 1}
-                                </div>
-                                <div className="min-w-0">
-                                  <h3 className="font-semibold text-slate-900 truncate">
-                                    {test.title || `Mock Test ${index + 1}`}
-                                  </h3>
-                                  <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                            <div className="flex items-center gap-3">
+                              <div className="h-9 w-9 rounded-xl bg-[#00448a]/10 text-[#00448a] flex items-center justify-center font-bold text-sm shrink-0">
+                                {index + 1}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <h3 className="font-semibold text-slate-900 truncate">
+                                  {test.title || `Mock Test ${index + 1}`}
+                                </h3>
+                                <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                  <span
+                                    className={`inline-flex items-center text-[11px] px-1.5 py-0.5 rounded-full font-medium ${
+                                      testLocked
+                                        ? "bg-rose-50 text-rose-700"
+                                        : "bg-emerald-50 text-emerald-700"
+                                    }`}
+                                  >
+                                    {testLocked ? "Locked" : "Open"}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
+                                    <FileQuestion className="h-3 w-3" />
+                                    {summary.mcq}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-700 font-medium">
+                                    <Code2 className="h-3 w-3" />
+                                    {summary.coding}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
+                                    <Clock className="h-3 w-3" />
+                                    {test.durationMinutes || 60}m
+                                  </span>
+                                  {summary.sections.slice(0, 2).map((sec) => (
                                     <span
-                                      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${
-                                        testLocked
-                                          ? "bg-rose-50 text-rose-700"
-                                          : "bg-emerald-50 text-emerald-700"
-                                      }`}
+                                      key={sec}
+                                      className="hidden md:inline-flex text-[10px] px-1.5 py-0.5 rounded-full bg-[#26ebe5]/15 text-[#00448a] font-medium"
                                     >
-                                      {testLocked ? "Locked" : "Open"}
+                                      {sec}
                                     </span>
-                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
-                                      <FileQuestion className="h-3 w-3" />
-                                      {summary.mcq} MCQ
-                                    </span>
-                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 font-medium">
-                                      <Code2 className="h-3 w-3" />
-                                      {summary.coding} Coding
-                                    </span>
-                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
-                                      <Clock className="h-3 w-3" />
-                                      {test.durationMinutes || 60} min
-                                    </span>
-                                  </div>
-                                  {summary.sections.length > 0 && (
-                                    <div className="flex flex-wrap gap-1 mt-2">
-                                      {summary.sections.slice(0, 4).map((sec) => (
-                                        <span
-                                          key={sec}
-                                          className="text-[10px] px-2 py-0.5 rounded-full bg-[#26ebe5]/15 text-[#00448a] font-medium"
-                                        >
-                                          {sec}
-                                        </span>
-                                      ))}
-                                      {summary.sections.length > 4 && (
-                                        <span className="text-[10px] text-slate-400">
-                                          +{summary.sections.length - 4} more
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
+                                  ))}
                                 </div>
                               </div>
-                              <div className="flex flex-wrap gap-2 shrink-0">
+                              <div className="flex items-center gap-1.5 shrink-0">
                                 <button
                                   type="button"
                                   onClick={() => handleToggleTestLock(test)}
                                   disabled={lockingTestId === test.id}
-                                  className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
+                                  title={testLocked ? "Unlock" : "Lock"}
+                                  className={`inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
                                     testLocked
                                       ? "bg-emerald-600 hover:bg-emerald-700"
                                       : "bg-slate-700 hover:bg-slate-800"
@@ -1257,38 +1247,39 @@ export default function AdminMockTestCompanyPage() {
                                   ) : (
                                     <Lock className="h-4 w-4" />
                                   )}
-                                  {lockingTestId === test.id
-                                    ? "…"
-                                    : testLocked
-                                      ? "Unlock"
-                                      : "Lock"}
+                                  <span className="hidden xl:inline">
+                                    {lockingTestId === test.id ? "…" : testLocked ? "Unlock" : "Lock"}
+                                  </span>
                                 </button>
                                 <Link
                                   href={`/Admin/mock-test/${companySlug}/results?test=${test.id}`}
-                                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm hover:bg-white"
+                                  title="Results"
+                                  className="inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl border border-slate-200 text-sm hover:bg-white"
                                 >
                                   <Users className="h-4 w-4" />
-                                  Results
+                                  <span className="hidden lg:inline">Results</span>
                                 </Link>
                                 <button
                                   type="button"
                                   onClick={() => openQuestionEditor(test.id)}
-                                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76] shadow-sm"
+                                  className="inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76] shadow-sm"
                                 >
                                   <Pencil className="h-4 w-4" />
-                                  Questions
+                                  <span className="hidden sm:inline">Questions</span>
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => startEditMeta(test)}
-                                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm hover:bg-white"
+                                  title="Edit"
+                                  className="inline-flex items-center justify-center h-9 w-9 rounded-xl border border-slate-200 text-sm hover:bg-white"
                                 >
-                                  Edit
+                                  <Settings2 className="h-4 w-4" />
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteTest(test)}
-                                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-red-200 text-red-600 text-sm hover:bg-red-50"
+                                  title="Delete"
+                                  className="inline-flex items-center justify-center h-9 w-9 rounded-xl border border-red-200 text-red-600 text-sm hover:bg-red-50"
                                 >
                                   <Trash2 className="h-4 w-4" />
                                 </button>

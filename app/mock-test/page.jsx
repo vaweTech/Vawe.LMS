@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import CheckAuth from "@/lib/CheckAuth";
 import { fetchMockTestGroups, fetchMockTestsForCompany } from "@/lib/mockTests";
 import { AcademicCapIcon, ChevronRightIcon } from "@heroicons/react/24/solid";
+import { CardGridSkeleton } from "@/components/PageSkeleton";
 
 export default function MockTestCompaniesPage() {
   const [companies, setCompanies] = useState([]);
@@ -54,7 +55,7 @@ export default function MockTestCompaniesPage() {
           </p>
 
           {loading ? (
-            <div className="text-center py-12 text-gray-500">Loading companies...</div>
+            <CardGridSkeleton count={4} />
           ) : companies.length === 0 ? (
             <div className="bg-white rounded-xl border p-8 text-center text-gray-600">
               No mock test groups available yet.
