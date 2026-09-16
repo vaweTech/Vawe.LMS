@@ -7,6 +7,7 @@ import CheckAuth from "@/lib/CheckAuth";
 import {
   fetchMockTestGroup,
   fetchMockTestsForCompany,
+  isMockTestLocked,
   summarizeMockTestQuestions,
 } from "@/lib/mockTests";
 import {
@@ -14,6 +15,7 @@ import {
   ClockIcon,
   CodeBracketIcon,
   DocumentTextIcon,
+  LockClosedIcon,
   PlayIcon,
 } from "@heroicons/react/24/solid";
 
@@ -21,6 +23,7 @@ export default function MockTestCompanyPage() {
   const { companySlug } = useParams();
   const router = useRouter();
   const [tests, setTests] = useState([]);
+  const [group, setGroup] = useState(null);
   const [groupLabel, setGroupLabel] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -34,6 +37,7 @@ export default function MockTestCompanyPage() {
           fetchMockTestsForCompany(companySlug),
         ]);
         if (!cancelled) {
+          setGroup(group);
           setGroupLabel(group?.label || String(companySlug || "").replace(/_/g, " "));
           setTests(list);
         }
@@ -116,6 +120,7 @@ export default function MockTestCompanyPage() {
               {tests.map((test, index) => {
                 const summary = summarizeMockTestQuestions(test.questions);
                 const duration = Number(test.durationMinutes) || null;
+                const locked = isMockTestLocked(test, group);
 
                 return (
                   <article
@@ -139,6 +144,11 @@ export default function MockTestCompanyPage() {
                           <h2 className="text-xl font-bold text-gray-900">
                             {test.title || `Mock Test ${index + 1}`}
                           </h2>
+                          {locked ? (
+                            <p className="mt-2 text-sm text-rose-700">
+                              This test is locked. You can start it after the admin unlocks it.
+                            </p>
+                          ) : null}
 
                           <div className="flex flex-wrap gap-2 mt-3">
                             {summary.mcq > 0 && (
@@ -174,13 +184,20 @@ export default function MockTestCompanyPage() {
                           )}
                         </div>
 
-                        <Link
-                          href={`/mock-test/${companySlug}/${test.id}`}
-                          className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#00448a] hover:bg-[#003a76] text-white font-semibold shadow-md shrink-0 transition"
-                        >
-                          <PlayIcon className="h-5 w-5" />
-                          Start Test
-                        </Link>
+                        {locked ? (
+                          <div className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-slate-200 text-slate-600 font-semibold shrink-0 cursor-not-allowed">
+                            <LockClosedIcon className="h-5 w-5" />
+                            Locked
+                          </div>
+                        ) : (
+                          <Link
+                            href={`/mock-test/${companySlug}/${test.id}`}
+                            className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-[#00448a] hover:bg-[#003a76] text-white font-semibold shadow-md shrink-0 transition"
+                          >
+                            <PlayIcon className="h-5 w-5" />
+                            Start Test
+                          </Link>
+                        )}
                       </div>
                     </div>
                   </article>

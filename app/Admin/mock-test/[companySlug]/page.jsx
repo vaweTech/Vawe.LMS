@@ -17,10 +17,12 @@ import {
   fetchMockTestsForCompany,
   getMockQuestionSubSection,
   getMockTestCompanyLabel,
+  isMockTestLocked,
   normalizeMockCompanyNames,
   sanitizeMockQuestions,
   summarizeMockTestQuestions,
   updateMockTest,
+  updateMockTestGroup,
 } from "@/lib/mockTests";
 import { parseDayMcqRows } from "@/lib/dayMcqUpload";
 import {
@@ -29,11 +31,14 @@ import {
   Code2,
   FileQuestion,
   ListChecks,
+  Lock,
   Pencil,
   Plus,
   Save,
   Trash2,
+  Unlock,
   Upload,
+  Users,
   X,
 } from "lucide-react";
 
@@ -310,6 +315,8 @@ export default function AdminMockTestCompanyPage() {
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [lockingAll, setLockingAll] = useState(false);
+  const [lockingTestId, setLockingTestId] = useState(null);
   const [testForm, setTestForm] = useState(emptyTestForm);
   const [editingTestId, setEditingTestId] = useState(null);
   const [editMeta, setEditMeta] = useState(emptyTestForm);
@@ -320,10 +327,10 @@ export default function AdminMockTestCompanyPage() {
   const [sectionMap, setSectionMap] = useState({});
   const [newSectionName, setNewSectionName] = useState("");
   const [newSubSectionName, setNewSubSectionName] = useState("");
+  const [newSubSectionParent, setNewSubSectionParent] = useState("");
   const [activeMcqScope, setActiveMcqScope] = useState(SCOPE_ALL);
   const [activeMcqSubScope, setActiveMcqSubScope] = useState(SCOPE_ALL);
   const [activeCodingScope, setActiveCodingScope] = useState(SCOPE_ALL);
-  const [activeCodingSubScope, setActiveCodingSubScope] = useState(SCOPE_ALL);
   const [imageUploadKey, setImageUploadKey] = useState("");
   const [uploadPreview, setUploadPreview] = useState(null);
 
@@ -359,11 +366,6 @@ export default function AdminMockTestCompanyPage() {
     return collectSubSectionsForSection(activeMcqScope, sectionMap, mcqDrafts);
   }, [activeMcqScope, sectionMap, mcqDrafts]);
 
-  const codingSubSectionNames = useMemo(() => {
-    if (activeCodingScope === SCOPE_ALL || activeCodingScope === SCOPE_UNASSIGNED) return [];
-    return collectSubSectionsForSection(activeCodingScope, sectionMap, codingDrafts);
-  }, [activeCodingScope, sectionMap, codingDrafts]);
-
   const hasMcqUnassignedSection = useMemo(
     () => hasUnassignedSections(mcqDrafts),
     [mcqDrafts]
@@ -376,10 +378,6 @@ export default function AdminMockTestCompanyPage() {
     () => hasUnassignedSubSections(mcqDrafts, activeMcqScope),
     [mcqDrafts, activeMcqScope]
   );
-  const hasCodingUnassignedSubSection = useMemo(
-    () => hasUnassignedSubSections(codingDrafts, activeCodingScope),
-    [codingDrafts, activeCodingScope]
-  );
 
   const visibleMcqs = useMemo(
     () => filterDraftsByScope(mcqDrafts, activeMcqScope, activeMcqSubScope),
@@ -387,17 +385,13 @@ export default function AdminMockTestCompanyPage() {
   );
 
   const visibleCoding = useMemo(
-    () => filterDraftsByScope(codingDrafts, activeCodingScope, activeCodingSubScope),
-    [codingDrafts, activeCodingScope, activeCodingSubScope]
+    () => filterDraftsByScope(codingDrafts, activeCodingScope, SCOPE_ALL),
+    [codingDrafts, activeCodingScope]
   );
 
   useEffect(() => {
     setActiveMcqSubScope(SCOPE_ALL);
   }, [activeMcqScope]);
-
-  useEffect(() => {
-    setActiveCodingSubScope(SCOPE_ALL);
-  }, [activeCodingScope]);
 
   useEffect(() => {
     if (!hasMcqUnassignedSection && activeMcqScope === SCOPE_UNASSIGNED) {
@@ -416,12 +410,6 @@ export default function AdminMockTestCompanyPage() {
       setActiveMcqSubScope(SCOPE_ALL);
     }
   }, [hasMcqUnassignedSubSection, activeMcqSubScope]);
-
-  useEffect(() => {
-    if (!hasCodingUnassignedSubSection && activeCodingSubScope === SCOPE_UNASSIGNED) {
-      setActiveCodingSubScope(SCOPE_ALL);
-    }
-  }, [hasCodingUnassignedSubSection, activeCodingSubScope]);
 
   const pageStats = useMemo(() => {
     let mcq = 0;
@@ -533,6 +521,53 @@ export default function AdminMockTestCompanyPage() {
     }
   }
 
+  const allTestsLocked =
+    tests.length > 0 && tests.every((t) => isMockTestLocked(t, group));
+
+  async function handleToggleAllLocks() {
+    const nextLocked = !allTestsLocked;
+    const ok = confirm(
+      nextLocked
+        ? "Lock all tests? Students will not be able to start them until you unlock."
+        : "Unlock all tests? Students will be able to start them."
+    );
+    if (!ok) return;
+    setLockingAll(true);
+    try {
+      await updateMockTestGroup(companySlug, { locked: nextLocked });
+      await Promise.all(
+        tests.map((t) => updateMockTest(companySlug, t.id, { locked: nextLocked }))
+      );
+      setGroup((prev) => (prev ? { ...prev, locked: nextLocked } : { locked: nextLocked }));
+      setTests((prev) => prev.map((t) => ({ ...t, locked: nextLocked })));
+      alert(nextLocked ? "All tests locked." : "All tests unlocked. Students can start them.");
+    } catch (err) {
+      alert(err?.message || "Failed to update lock.");
+    } finally {
+      setLockingAll(false);
+    }
+  }
+
+  async function handleToggleTestLock(test) {
+    const currentlyLocked = isMockTestLocked(test, group);
+    const nextLocked = !currentlyLocked;
+    setLockingTestId(test.id);
+    try {
+      await updateMockTest(companySlug, test.id, { locked: nextLocked });
+      if (!nextLocked && group?.locked) {
+        await updateMockTestGroup(companySlug, { locked: false });
+        setGroup((prev) => (prev ? { ...prev, locked: false } : prev));
+      }
+      setTests((prev) =>
+        prev.map((t) => (t.id === test.id ? { ...t, locked: nextLocked } : t))
+      );
+    } catch (err) {
+      alert(err?.message || "Failed to update lock.");
+    } finally {
+      setLockingTestId(null);
+    }
+  }
+
   async function openQuestionEditor(testId) {
     setSaving(true);
     try {
@@ -543,9 +578,9 @@ export default function AdminMockTestCompanyPage() {
       setActiveMcqScope(SCOPE_ALL);
       setActiveMcqSubScope(SCOPE_ALL);
       setActiveCodingScope(SCOPE_ALL);
-      setActiveCodingSubScope(SCOPE_ALL);
       setNewSectionName("");
       setNewSubSectionName("");
+      setNewSubSectionParent("");
       const loaded = Array.isArray(test?.questions) && test.questions.length
         ? test.questions.map((q, idx) => {
             if (q?.type === "coding") {
@@ -553,6 +588,8 @@ export default function AdminMockTestCompanyPage() {
                 {
                   ...createEmptyMockCodingQuestion(),
                   ...q,
+                  section: String(q?.section || "").trim(),
+                  subSection: "",
                   companyNames: normalizeMockCompanyNames(q?.companyNames ?? q?.companyName),
                   testCases: Array.isArray(q.testCases) && q.testCases.length
                     ? q.testCases.map((tc) => ({
@@ -638,12 +675,11 @@ export default function AdminMockTestCompanyPage() {
 
   function addQuestion(type) {
     const activeScope = type === "coding" ? activeCodingScope : activeMcqScope;
-    const activeSubScope = type === "coding" ? activeCodingSubScope : activeMcqSubScope;
     const section = scopeSection(activeScope);
-    const subSection = scopeSubSection(activeSubScope);
+    const subSection = type === "coding" ? "" : scopeSubSection(activeMcqSubScope);
     const base =
       type === "coding"
-        ? createEmptyMockCodingQuestion(section, subSection)
+        ? createEmptyMockCodingQuestion(section)
         : createEmptyMockQuestion(section, subSection);
     setQuestionDrafts((prev) => [...prev, ensureDraftId(base, prev.length)]);
   }
@@ -657,20 +693,24 @@ export default function AdminMockTestCompanyPage() {
     else setActiveMcqScope(n);
   }
 
-  function addSubSection(type) {
-    const sectionScope = type === "coding" ? activeCodingScope : activeMcqScope;
+  function addSubSection() {
     const n = String(newSubSectionName || "").trim();
-    if (!n || sectionScope === SCOPE_ALL || sectionScope === SCOPE_UNASSIGNED) {
+    const section =
+      activeMcqScope !== SCOPE_ALL && activeMcqScope !== SCOPE_UNASSIGNED
+        ? activeMcqScope
+        : String(newSubSectionParent || "").trim();
+    if (!n || !section) {
       alert("Select a section first, then add a sub-section.");
       return;
     }
     setSectionMap((prev) => ({
       ...prev,
-      [sectionScope]: Array.from(new Set([...(prev[sectionScope] || []), n])),
+      [section]: Array.from(new Set([...(prev[section] || []), n])),
     }));
     setNewSubSectionName("");
-    if (type === "coding") setActiveCodingSubScope(n);
-    else setActiveMcqSubScope(n);
+    setNewSubSectionParent("");
+    setActiveMcqScope(section);
+    setActiveMcqSubScope(n);
   }
 
   async function runQuestionImageUpload(file, draftId) {
@@ -727,7 +767,7 @@ export default function AdminMockTestCompanyPage() {
   function applyUploadedQuestions(questions, mode = "append") {
     const incoming = sanitizeMockQuestions(questions).map((q, idx) => {
       if (q.type === "coding") {
-        return ensureDraftId({ ...createEmptyMockCodingQuestion(q.section), ...q }, idx);
+        return ensureDraftId({ ...createEmptyMockCodingQuestion(q.section), ...q, subSection: "" }, idx);
       }
       return ensureDraftId(
         {
@@ -956,6 +996,28 @@ export default function AdminMockTestCompanyPage() {
                     </p>
                   </div>
                 </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleAllLocks}
+                    disabled={lockingAll || tests.length === 0}
+                    className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
+                      allTestsLocked
+                        ? "bg-emerald-600 hover:bg-emerald-700"
+                        : "bg-slate-700 hover:bg-slate-800"
+                    }`}
+                  >
+                    {allTestsLocked ? <Unlock className="h-4 w-4" /> : <Lock className="h-4 w-4" />}
+                    {lockingAll ? "…" : allTestsLocked ? "Unlock all tests" : "Lock all tests"}
+                  </button>
+                  <Link
+                    href={`/Admin/mock-test/${companySlug}/results`}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-800 hover:bg-slate-50"
+                  >
+                    <Users className="h-4 w-4" />
+                    Test Results
+                  </Link>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
@@ -1060,6 +1122,7 @@ export default function AdminMockTestCompanyPage() {
                       {tests.map((test, index) => {
                         const summary = summarizeMockTestQuestions(test.questions);
                         const isEditingMeta = editingTestId === test.id;
+                        const testLocked = isMockTestLocked(test, group);
 
                         if (isEditingMeta) {
                           return (
@@ -1137,6 +1200,15 @@ export default function AdminMockTestCompanyPage() {
                                     {test.title || `Mock Test ${index + 1}`}
                                   </h3>
                                   <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                                    <span
+                                      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium ${
+                                        testLocked
+                                          ? "bg-rose-50 text-rose-700"
+                                          : "bg-emerald-50 text-emerald-700"
+                                      }`}
+                                    >
+                                      {testLocked ? "Locked" : "Open"}
+                                    </span>
                                     <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">
                                       <FileQuestion className="h-3 w-3" />
                                       {summary.mcq} MCQ
@@ -1170,6 +1242,34 @@ export default function AdminMockTestCompanyPage() {
                                 </div>
                               </div>
                               <div className="flex flex-wrap gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleTestLock(test)}
+                                  disabled={lockingTestId === test.id}
+                                  className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
+                                    testLocked
+                                      ? "bg-emerald-600 hover:bg-emerald-700"
+                                      : "bg-slate-700 hover:bg-slate-800"
+                                  }`}
+                                >
+                                  {testLocked ? (
+                                    <Unlock className="h-4 w-4" />
+                                  ) : (
+                                    <Lock className="h-4 w-4" />
+                                  )}
+                                  {lockingTestId === test.id
+                                    ? "…"
+                                    : testLocked
+                                      ? "Unlock"
+                                      : "Lock"}
+                                </button>
+                                <Link
+                                  href={`/Admin/mock-test/${companySlug}/results?test=${test.id}`}
+                                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm hover:bg-white"
+                                >
+                                  <Users className="h-4 w-4" />
+                                  Results
+                                </Link>
                                 <button
                                   type="button"
                                   onClick={() => openQuestionEditor(test.id)}
@@ -1310,15 +1410,31 @@ export default function AdminMockTestCompanyPage() {
                                 </button>
                               </div>
                             </div>
-                            {(questionType === "mcq"
-                              ? activeMcqScope !== SCOPE_ALL && activeMcqScope !== SCOPE_UNASSIGNED
-                              : activeCodingScope !== SCOPE_ALL && activeCodingScope !== SCOPE_UNASSIGNED) && (
+                            {questionType === "mcq" && mcqSectionNames.length > 0 && (
                               <div>
                                 <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                                  Sub-sections for{" "}
-                                  {questionType === "mcq" ? activeMcqScope : activeCodingScope}
+                                  Sub-sections
+                                  {activeMcqScope !== SCOPE_ALL &&
+                                  activeMcqScope !== SCOPE_UNASSIGNED
+                                    ? ` for ${activeMcqScope}`
+                                    : ""}
                                 </p>
                                 <div className="flex flex-wrap items-center gap-2">
+                                  {(activeMcqScope === SCOPE_ALL ||
+                                    activeMcqScope === SCOPE_UNASSIGNED) && (
+                                    <select
+                                      value={newSubSectionParent}
+                                      onChange={(e) => setNewSubSectionParent(e.target.value)}
+                                      className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white min-w-[140px]"
+                                    >
+                                      <option value="">Select section</option>
+                                      {mcqSectionNames.map((name) => (
+                                        <option key={name} value={name}>
+                                          {name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
                                   <input
                                     type="text"
                                     value={newSubSectionName}
@@ -1326,7 +1442,7 @@ export default function AdminMockTestCompanyPage() {
                                     onKeyDown={(e) => {
                                       if (e.key === "Enter") {
                                         e.preventDefault();
-                                        addSubSection(questionType);
+                                        addSubSection();
                                       }
                                     }}
                                     placeholder="New sub-section name (e.g. Section A)"
@@ -1334,7 +1450,7 @@ export default function AdminMockTestCompanyPage() {
                                   />
                                   <button
                                     type="button"
-                                    onClick={() => addSubSection(questionType)}
+                                    onClick={() => addSubSection()}
                                     className="px-4 py-2 text-sm font-semibold rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] transition-colors"
                                   >
                                     Add sub-section
@@ -1344,7 +1460,7 @@ export default function AdminMockTestCompanyPage() {
                             )}
                           </div>
 
-                          {mcqDrafts.length > 0 && (
+                          {questionType === "mcq" && (
                             <div className="mb-8">
                               <SectionTabs
                                 scope={activeMcqScope}
@@ -1512,7 +1628,7 @@ export default function AdminMockTestCompanyPage() {
                             </div>
                           )}
 
-                          {codingDrafts.length > 0 && (
+                          {questionType === "coding" && (
                             <div className="mb-8">
                               <SectionTabs
                                 scope={activeCodingScope}
@@ -1521,24 +1637,9 @@ export default function AdminMockTestCompanyPage() {
                                 allLabel="All Coding"
                                 showUnassigned={hasCodingUnassignedSection}
                               />
-                              {(codingSubSectionNames.length > 0 ||
-                                hasCodingUnassignedSubSection ||
-                                (activeCodingScope !== SCOPE_ALL &&
-                                  activeCodingScope !== SCOPE_UNASSIGNED)) && (
-                                <SubSectionTabs
-                                  scope={activeCodingSubScope}
-                                  setScope={setActiveCodingSubScope}
-                                  subSectionNames={codingSubSectionNames}
-                                  showUnassigned={hasCodingUnassignedSubSection}
-                                />
-                              )}
                               <div className="flex items-center justify-between mb-3 mt-4">
                                 <h3 className="text-base font-semibold text-gray-900">
-                                  {scopeTitle(
-                                    "Coding Questions",
-                                    activeCodingScope,
-                                    activeCodingSubScope
-                                  )}
+                                  {scopeTitle("Coding Questions", activeCodingScope, SCOPE_ALL)}
                                 </h3>
                                 <span className="text-xs text-gray-600">{visibleCoding.length} item(s)</span>
                               </div>
@@ -1566,28 +1667,6 @@ export default function AdminMockTestCompanyPage() {
                                         >
                                           <option value="">Unassigned</option>
                                           {codingSectionNames.map((name) => (
-                                            <option key={name} value={name}>
-                                              {name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                        <select
-                                          value={getMockQuestionSubSection(q)}
-                                          onChange={(e) =>
-                                            updateQuestionDraftById(q.draftId, {
-                                              subSection: e.target.value,
-                                            })
-                                          }
-                                          className="text-xs border rounded px-2 py-1 bg-white"
-                                          title="Sub-section"
-                                          disabled={!String(q.section || "").trim()}
-                                        >
-                                          <option value="">Unassigned</option>
-                                          {collectSubSectionsForSection(
-                                            q.section,
-                                            sectionMap,
-                                            codingDrafts
-                                          ).map((name) => (
                                             <option key={name} value={name}>
                                               {name}
                                             </option>
@@ -1700,9 +1779,14 @@ export default function AdminMockTestCompanyPage() {
                             </div>
                           )}
 
-                          {mcqDrafts.length === 0 && codingDrafts.length === 0 && (
+                          {questionType === "mcq" && visibleMcqs.length === 0 && (
                             <p className="text-sm text-gray-500 py-6 text-center">
-                              No questions yet. Choose MCQ or Coding and click Add question.
+                              No MCQ questions in this section yet. Click Add question.
+                            </p>
+                          )}
+                          {questionType === "coding" && visibleCoding.length === 0 && (
+                            <p className="text-sm text-gray-500 py-6 text-center">
+                              No coding questions in this section yet. Click Add question.
                             </p>
                           )}
               </div>

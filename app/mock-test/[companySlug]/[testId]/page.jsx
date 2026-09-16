@@ -1,18 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import CheckAuth from "@/lib/CheckAuth";
 import { isAppleMobileDevice } from "@/lib/deviceDetect";
+import { auth, db } from "@/lib/firebase";
+import { doc, getDoc } from "firebase/firestore";
 import {
   fetchMockTest,
   fetchMockTestGroup,
   getMockQuestionSubSection,
   getMockSubSectionsForSection,
   isMockAnswerCorrect,
+  isMockTestLocked,
   MOCK_JUDGE_LANGUAGES,
   normalizeMockQuestionOptions,
+  saveMockTestSubmission,
   summarizeMockTestQuestions,
   transformMockCompilerInput,
 } from "@/lib/mockTests";
@@ -78,9 +82,36 @@ function SecureExamOverlays({
   );
 }
 
+function extractCompilerError(data, resOk) {
+  const compileOutput = String(data?.compile_output || data?.raw?.compile_output || "").trim();
+  const stderr = String(data?.stderr || "").trim();
+  const apiError = String(data?.error || "").trim();
+  const status = String(data?.status || data?.raw?.status?.description || "").trim();
+  if (apiError) return apiError;
+  if (compileOutput) return compileOutput;
+  if (/compil/i.test(status) && (stderr || data?.stdout)) {
+    return stderr || String(data.stdout || "").trim();
+  }
+  if (stderr) return stderr;
+  if (!resOk) return status || "Could not run code.";
+  if (/error|fail|time.?limit/i.test(status) && !String(data?.stdout || "").trim()) {
+    return status;
+  }
+  return "";
+}
+
+function isCompileFailure(data, errorText) {
+  const status = String(data?.status || data?.raw?.status?.description || "");
+  const compileOutput = String(data?.compile_output || data?.raw?.compile_output || "").trim();
+  return Boolean(compileOutput) || /compil/i.test(status) || /compil/i.test(errorText || "");
+}
+
 async function runCodingTestCases(code, language, testCases) {
   const results = [];
-  for (const tc of testCases) {
+  const cases = Array.isArray(testCases) ? testCases : [];
+  for (let i = 0; i < cases.length; i++) {
+    const tc = cases[i];
+    const expected = String(tc?.output || "").trim();
     try {
       const res = await fetch("/api/compile", {
         method: "POST",
@@ -91,16 +122,39 @@ async function runCodingTestCases(code, language, testCases) {
           stdin: transformMockCompilerInput(tc?.input || ""),
         }),
       });
-      const data = await res.json();
-      const actual = (data.stdout || "").trim();
-      const expected = String(tc?.output || "").trim();
+      const data = await res.json().catch(() => ({}));
+      const error = extractCompilerError(data, res.ok);
+      const actual = String(data.stdout || "").trim();
+      const pass = !error && actual.toLowerCase() === expected.toLowerCase();
       results.push({
-        pass: actual.toLowerCase() === expected.toLowerCase(),
+        pass,
         actual,
         expected,
+        error,
+        status: String(data?.status || ""),
       });
-    } catch {
-      results.push({ pass: false, actual: "Error", expected: String(tc?.output || "") });
+      if (error && isCompileFailure(data, error)) {
+        for (let j = i + 1; j < cases.length; j++) {
+          results.push({
+            pass: false,
+            actual: "",
+            expected: String(cases[j]?.output || "").trim(),
+            error: "Skipped — fix the compile error and run again.",
+            skipped: true,
+            status: "",
+          });
+        }
+        break;
+      }
+    } catch (err) {
+      results.push({
+        pass: false,
+        actual: "",
+        expected,
+        error: err?.message || "Could not reach the compiler.",
+        status: "Network error",
+      });
+      break;
     }
   }
   return results;
@@ -118,6 +172,7 @@ export default function TakeMockTestPage() {
   const { companySlug, testId } = useParams();
   const router = useRouter();
   const [test, setTest] = useState(null);
+  const [group, setGroup] = useState(null);
   const [groupLabel, setGroupLabel] = useState("");
   const [loading, setLoading] = useState(true);
   const [answers, setAnswers] = useState({});
@@ -132,6 +187,7 @@ export default function TakeMockTestPage() {
   const [runResults, setRunResults] = useState({});
   const [runLoading, setRunLoading] = useState({});
   const [scoreDetail, setScoreDetail] = useState(null);
+  const didInitPart = useRef(false);
 
   const companyLabel = groupLabel || String(companySlug || "").replace(/_/g, " ");
   const durationMinutes = Number(test?.durationMinutes) || 0;
@@ -166,11 +222,8 @@ export default function TakeMockTestPage() {
   }, [partQuestions]);
 
   const subSectionsInSection = useMemo(() => {
-    return getMockSubSectionsForSection(
-      questions,
-      part === "coding" ? "coding" : "mcq",
-      activeSection
-    );
+    if (part === "coding") return [];
+    return getMockSubSectionsForSection(questions, "mcq", activeSection);
   }, [questions, part, activeSection]);
 
   const sectionQuestions = useMemo(() => {
@@ -189,8 +242,14 @@ export default function TakeMockTestPage() {
   const currentIdx = currentEntry?.index ?? activeIndex;
 
   useEffect(() => {
-    if (summary.mcq > 0) setPart("mcq");
-    else if (summary.coding > 0) setPart("coding");
+    if (didInitPart.current) return;
+    if (summary.mcq > 0) {
+      setPart("mcq");
+      didInitPart.current = true;
+    } else if (summary.coding > 0) {
+      setPart("coding");
+      didInitPart.current = true;
+    }
   }, [summary.mcq, summary.coding]);
 
   useEffect(() => {
@@ -249,30 +308,97 @@ export default function TakeMockTestPage() {
     let mcqTotal = 0;
     let codingScore = 0;
     let codingMax = 0;
+    let mcqAnswered = 0;
+    let codingAttempted = 0;
+    const questionBreakdown = [];
 
     for (let idx = 0; idx < questions.length; idx++) {
       const q = questions[idx];
+      const section = String(q?.section || "").trim() || "General";
+      const subSection = getMockQuestionSubSection(q) || "";
       if ((q?.type || "mcq") === "mcq") {
         mcqTotal += 1;
-        if (isMockAnswerCorrect(q, answers[idx])) mcqCorrect += 1;
+        const unanswered = answers[idx] == null || answers[idx] === "";
+        if (!unanswered) mcqAnswered += 1;
+        const correct = isMockAnswerCorrect(q, answers[idx]);
+        if (correct) mcqCorrect += 1;
+        questionBreakdown.push({
+          i: idx,
+          type: "mcq",
+          section,
+          subSection,
+          correct,
+          unanswered,
+        });
       } else if (q?.type === "coding") {
         const maxScore = Number(q.maxScore) || 10;
         codingMax += maxScore;
         const code = answers[idx] || q.starterCode || "";
         const lang = codeLanguages[idx] || q.language || "javascript";
         const cases = Array.isArray(q.testCases) ? q.testCases : [];
+        const attempted =
+          Boolean(String(code).trim()) &&
+          String(code).trim() !== String(q.starterCode || "").trim();
+        if (attempted) codingAttempted += 1;
+        let passed = 0;
         if (cases.length && String(code).trim()) {
           const results = await runCodingTestCases(code, lang, cases);
-          const passed = results.filter((r) => r.pass).length;
+          passed = results.filter((r) => r.pass).length;
           codingScore += maxScore * (passed / cases.length);
         }
+        questionBreakdown.push({
+          i: idx,
+          type: "coding",
+          section,
+          subSection,
+          passed,
+          totalCases: cases.length,
+          score: cases.length ? maxScore * (passed / cases.length) : 0,
+          maxScore,
+          attempted,
+        });
       }
     }
 
-    setScoreDetail({ mcqCorrect, mcqTotal, codingScore, codingMax });
+    const score = { mcqCorrect, mcqTotal, codingScore, codingMax };
+
+    setScoreDetail(score);
     setSubmitted(true);
     markSubmitted();
-  }, [questions, answers, codeLanguages, markSubmitted]);
+
+    const user = auth?.currentUser;
+    if (user?.uid && companySlug && testId) {
+      try {
+        let name = user.displayName || "";
+        let email = user.email || "";
+        if (db) {
+          const [userSnap, studentSnap] = await Promise.all([
+            getDoc(doc(db, "users", user.uid)),
+            getDoc(doc(db, "students", user.uid)),
+          ]);
+          if (studentSnap.exists()) {
+            name = studentSnap.data()?.name || name;
+            email = studentSnap.data()?.email || email;
+          }
+          if (userSnap.exists()) {
+            name = userSnap.data()?.name || name;
+            email = userSnap.data()?.email || email;
+          }
+        }
+        await saveMockTestSubmission(companySlug, testId, {
+          userId: user.uid,
+          name,
+          email,
+          ...score,
+          mcqAnswered,
+          codingAttempted,
+          questionBreakdown,
+        });
+      } catch (e) {
+        console.error("Failed to save mock test result:", e);
+      }
+    }
+  }, [questions, answers, codeLanguages, markSubmitted, companySlug, testId]);
 
   useEffect(() => {
     setOnTimeUp(() => {
@@ -291,6 +417,7 @@ export default function TakeMockTestPage() {
           fetchMockTest(companySlug, testId),
         ]);
         if (!cancelled) {
+          setGroup(group);
           setGroupLabel(group?.label || String(companySlug || "").replace(/_/g, " "));
           setTest(data);
           const langs = {};
@@ -327,10 +454,7 @@ export default function TakeMockTestPage() {
     } else {
       setReviewMap((m) => ({ ...m, [currentIdx]: false }));
     }
-    const pos = sectionQuestions.findIndex(({ index }) => index === currentIdx);
-    if (pos >= 0 && pos < sectionQuestions.length - 1) {
-      goToQuestion(sectionQuestions[pos + 1].index);
-    }
+    goToNextScope();
   }
 
   function clearCurrentResponse() {
@@ -365,11 +489,6 @@ export default function TakeMockTestPage() {
     setRunLoading((p) => ({ ...p, [currentIdx]: false }));
   }
 
-  function handleSubmit() {
-    if (!confirm("Submit the test? You cannot change answers after submitting.")) return;
-    finalizeSubmit();
-  }
-
   function switchPart(nextPart) {
     setPart(nextPart);
     const nextQs = questions
@@ -380,13 +499,61 @@ export default function TakeMockTestPage() {
     if (nextQs.length) {
       const sec = String(nextQs[0].q?.section || "").trim() || "General";
       setActiveSection(sec);
-      const subs = getMockSubSectionsForSection(
-        questions,
-        nextPart === "coding" ? "coding" : "mcq",
-        sec
-      );
+      const subs =
+        nextPart === "coding"
+          ? []
+          : getMockSubSectionsForSection(questions, "mcq", sec);
       setActiveSubSection(subs[0] || "General");
     }
+  }
+
+  function goToNextScope() {
+    const pos = sectionQuestions.findIndex(({ index }) => index === currentIdx);
+    if (pos >= 0 && pos < sectionQuestions.length - 1) {
+      goToQuestion(sectionQuestions[pos + 1].index);
+      return true;
+    }
+    if (subSectionsInSection.length) {
+      const subIdx = subSectionsInSection.indexOf(activeSubSection);
+      if (subIdx >= 0 && subIdx < subSectionsInSection.length - 1) {
+        setActiveSubSection(subSectionsInSection[subIdx + 1]);
+        return true;
+      }
+    }
+    const secIdx = sectionsInPart.indexOf(activeSection);
+    if (secIdx >= 0 && secIdx < sectionsInPart.length - 1) {
+      const nextSec = sectionsInPart[secIdx + 1];
+      setActiveSection(nextSec);
+      const subs =
+        part === "coding"
+          ? []
+          : getMockSubSectionsForSection(questions, "mcq", nextSec);
+      setActiveSubSection(subs[0] || "General");
+      return true;
+    }
+    if (part === "mcq" && summary.coding > 0) {
+      switchPart("coding");
+      return true;
+    }
+    return false;
+  }
+
+  const canContinueToCoding = part === "mcq" && summary.coding > 0;
+  const canGoNext =
+    currentPos < sectionQuestions.length - 1 ||
+    (subSectionsInSection.length > 0 &&
+      subSectionsInSection.indexOf(activeSubSection) <
+        subSectionsInSection.length - 1) ||
+    sectionsInPart.indexOf(activeSection) < sectionsInPart.length - 1 ||
+    canContinueToCoding;
+
+  function handleSubmit() {
+    if (canContinueToCoding) {
+      switchPart("coding");
+      return;
+    }
+    if (!confirm("Submit the test? You cannot change answers after submitting.")) return;
+    finalizeSubmit();
   }
 
   if (loading) {
@@ -405,6 +572,27 @@ export default function TakeMockTestPage() {
           <Link href={`/mock-test/${companySlug}`} className="text-[#00448a] hover:underline">
             Back to {companyLabel}
           </Link>
+        </div>
+      </CheckAuth>
+    );
+  }
+
+  if (isMockTestLocked(test, group)) {
+    return (
+      <CheckAuth>
+        <div className="min-h-dvh flex items-center justify-center bg-slate-50 px-4">
+          <div className="max-w-md w-full bg-white rounded-2xl border border-slate-200 p-8 text-center">
+            <h1 className="text-xl font-bold text-slate-900 mb-2">Test locked</h1>
+            <p className="text-sm text-slate-600 mb-6">
+              This mock test is locked. You can start it after the admin unlocks it.
+            </p>
+            <Link
+              href={`/mock-test/${companySlug}`}
+              className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
+            >
+              Back to {companyLabel}
+            </Link>
+          </div>
         </div>
       </CheckAuth>
     );
@@ -548,9 +736,9 @@ export default function TakeMockTestPage() {
 
         {/* Section tabs */}
         {sectionsInPart.length > 0 && (
-          <div className="bg-white border-b shrink-0 px-4 py-2">
-            <p className="text-xs font-semibold text-gray-500 uppercase mb-1.5">Sections</p>
-            <div className="flex flex-wrap gap-2">
+          <div className="bg-white border-b shrink-0 px-3 lg:px-4 py-1.5 lg:py-2">
+            <p className="text-[10px] lg:text-xs font-semibold text-gray-500 uppercase mb-1">Sections</p>
+            <div className="flex flex-wrap gap-1.5 lg:gap-2">
               {sectionsInPart.map((sec) => (
                 <button
                   key={sec}
@@ -564,7 +752,7 @@ export default function TakeMockTestPage() {
                     );
                     setActiveSubSection(subs[0] || "General");
                   }}
-                  className={`px-4 py-1.5 rounded text-sm font-medium border transition ${
+                  className={`px-3 lg:px-4 py-1 lg:py-1.5 rounded text-xs lg:text-sm font-medium border transition ${
                     activeSection === sec
                       ? "bg-[#00448a] text-white border-[#00448a]"
                       : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
@@ -601,12 +789,20 @@ export default function TakeMockTestPage() {
         <div className="flex flex-1 min-h-0 overflow-hidden">
           {/* Main question panel */}
           <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+            <div
+              className={`flex-1 min-h-0 ${
+                isMcq ? "overflow-y-auto p-3 lg:p-4" : "overflow-hidden p-2 sm:p-3"
+              }`}
+            >
               {currentQ ? (
-                <div className="max-w-3xl mx-auto bg-white rounded-lg border border-gray-200 shadow-sm">
-                  <div className="px-4 py-3 border-b bg-gray-50 flex flex-wrap items-center justify-between gap-2">
+                <div
+                  className={`bg-white rounded-lg border border-gray-200 shadow-sm ${
+                    isMcq ? "max-w-4xl mx-auto" : "h-full min-h-0 flex flex-col"
+                  }`}
+                >
+                  <div className="px-3 lg:px-4 py-2 lg:py-2.5 border-b bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
                     <div>
-                      <p className="text-xs text-gray-500">
+                      <p className="text-[11px] lg:text-xs text-gray-500">
                         Question Type:{" "}
                         <span className="font-semibold text-gray-800">
                           {isMcq ? "Multiple Choice" : "Coding"}
@@ -616,28 +812,29 @@ export default function TakeMockTestPage() {
                         Question No. {(currentPos >= 0 ? currentPos : 0) + 1}
                       </p>
                     </div>
-                    <span className="text-xs px-2 py-1 rounded bg-[#26ebe5]/20 text-[#00448a] font-medium">
+                    <span className="text-[11px] lg:text-xs px-2 py-1 rounded bg-[#26ebe5]/20 text-[#00448a] font-medium">
                       {activeSection}
                       {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""}
                     </span>
                   </div>
 
-                  <div className="p-4 sm:p-6">
-                    <p className="text-base sm:text-lg font-semibold text-gray-900 leading-relaxed">
-                      {currentQ.question || currentQ.title || "Question"}
-                    </p>
-                    {currentQ.description ? (
-                      <p className="mt-3 text-sm text-gray-600 whitespace-pre-wrap">{currentQ.description}</p>
-                    ) : null}
-
-                    {isMcq ? (
-                      <div className="mt-5 space-y-2">
+                  {isMcq ? (
+                    <div className="p-4 lg:p-5">
+                      <p className="text-base lg:text-[17px] font-semibold text-gray-900 leading-relaxed whitespace-pre-wrap">
+                        {currentQ.question || currentQ.title || "Question"}
+                      </p>
+                      {currentQ.description ? (
+                        <p className="mt-3 text-sm text-gray-600 whitespace-pre-wrap">
+                          {currentQ.description}
+                        </p>
+                      ) : null}
+                      <div className="mt-4 space-y-2">
                         {options.map((option, optIdx) => {
                           const selected = answers[currentIdx] === optIdx;
                           return (
                             <label
                               key={optIdx}
-                              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition ${
+                              className={`flex items-start gap-3 p-2.5 lg:p-3 rounded-lg border cursor-pointer transition ${
                                 selected
                                   ? "border-[#00448a] bg-blue-50"
                                   : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
@@ -660,26 +857,47 @@ export default function TakeMockTestPage() {
                           );
                         })}
                       </div>
-                    ) : (
-                      <div className="mt-5 space-y-4">
+                    </div>
+                  ) : (
+                    <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+                      <div className="min-h-0 overflow-y-auto p-3 lg:p-4 border-b lg:border-b-0 lg:border-r space-y-3">
+                        <div className="rounded-xl border border-gray-200 bg-slate-50/70 px-3 py-3">
+                          <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                            Problem statement
+                          </p>
+                          <pre className="text-sm text-gray-900 leading-relaxed whitespace-pre-wrap font-sans">
+                            {currentQ.question || currentQ.title || "Question"}
+                          </pre>
+                        </div>
+                        {currentQ.description ? (
+                          <p className="text-sm text-gray-600 whitespace-pre-wrap">
+                            {currentQ.description}
+                          </p>
+                        ) : null}
                         {(currentQ.testCases || []).length > 0 && (
-                          <div className="rounded border bg-gray-50 p-3 text-xs">
-                            <p className="font-semibold mb-2">Test cases</p>
+                          <div className="rounded-lg border bg-gray-50 p-3 text-xs">
+                            <p className="font-semibold mb-2">Sample test cases</p>
                             {(currentQ.testCases || []).slice(0, 2).map((tc, i) => (
-                              <div key={i} className="grid sm:grid-cols-2 gap-2 mb-2">
-                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">{tc.input || "—"}</pre>
-                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">{tc.output || "—"}</pre>
+                              <div key={i} className="grid grid-cols-1 xl:grid-cols-2 gap-2 mb-2 last:mb-0">
+                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                  {tc.input || "—"}
+                                </pre>
+                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                  {tc.output || "—"}
+                                </pre>
                               </div>
                             ))}
                           </div>
                         )}
-                        <div className="flex flex-wrap items-center gap-3">
+                      </div>
+                      <div className="min-h-[240px] lg:min-h-0 flex flex-col p-3">
+                        <div className="flex flex-wrap items-center gap-2 mb-2 shrink-0">
                           <select
                             value={codeLanguages[currentIdx] || currentQ.language || "javascript"}
                             onChange={(e) =>
                               setCodeLanguages((p) => ({ ...p, [currentIdx]: e.target.value }))
                             }
-                            className="border rounded px-3 py-1.5 text-sm"
+                            className="border rounded px-2.5 py-1.5 text-sm"
                           >
                             <option value="javascript">JavaScript</option>
                             <option value="python">Python</option>
@@ -691,7 +909,7 @@ export default function TakeMockTestPage() {
                             type="button"
                             onClick={handleRunCode}
                             disabled={runLoading[currentIdx]}
-                            className="px-4 py-1.5 rounded bg-[#00448a] text-white text-sm disabled:opacity-60"
+                            className="px-3 py-1.5 rounded bg-[#00448a] text-white text-sm disabled:opacity-60"
                           >
                             {runLoading[currentIdx] ? "Running..." : "Run Code"}
                           </button>
@@ -699,37 +917,64 @@ export default function TakeMockTestPage() {
                         <textarea
                           value={answers[currentIdx] ?? currentQ.starterCode ?? ""}
                           onChange={(e) => setAnswers((p) => ({ ...p, [currentIdx]: e.target.value }))}
-                          rows={14}
-                          className="w-full border rounded-lg px-3 py-2 font-mono text-sm"
+                          className="w-full flex-1 min-h-[180px] lg:min-h-0 border rounded-lg px-3 py-2 font-mono text-sm resize-y lg:resize-none"
                           spellCheck={false}
                         />
                         {codingResults.length > 0 && (
-                          <div className="text-sm space-y-1">
-                            {codingResults.map((r, i) => (
-                              <p key={i} className={r.pass ? "text-green-700" : "text-red-700"}>
-                                Case {i + 1}: {r.pass ? "Passed" : "Failed"}
-                              </p>
-                            ))}
+                          <div className="mt-2 shrink-0 max-h-44 overflow-y-auto space-y-2">
+                            <div className="text-xs lg:text-sm space-y-1">
+                              {codingResults.map((r, i) => (
+                                <p
+                                  key={i}
+                                  className={
+                                    r.pass
+                                      ? "text-green-700"
+                                      : r.skipped
+                                        ? "text-amber-700"
+                                        : "text-red-700"
+                                  }
+                                >
+                                  Case {i + 1}:{" "}
+                                  {r.pass
+                                    ? "Passed"
+                                    : r.skipped
+                                      ? "Skipped"
+                                      : r.error
+                                        ? "Error"
+                                        : "Failed"}
+                                </p>
+                              ))}
+                            </div>
+                            {codingResults.some((r) => r.error && !r.skipped) ? (
+                              <div className="rounded-lg border border-red-300 bg-red-50 p-2.5">
+                                <p className="text-[11px] font-semibold text-red-800 uppercase tracking-wide mb-1">
+                                  Compiler / runtime error
+                                </p>
+                                <pre className="text-[11px] leading-relaxed text-red-800 whitespace-pre-wrap font-mono">
+                                  {codingResults.find((r) => r.error && !r.skipped)?.error}
+                                </pre>
+                              </div>
+                            ) : null}
                           </div>
                         )}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
 
                   {/* Action bar */}
-                  <div className="px-4 py-3 border-t bg-gray-50 flex flex-wrap items-center justify-between gap-2">
+                  <div className="px-3 lg:px-4 py-2 lg:py-2.5 border-t bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => goNext(true)}
-                        className="px-4 py-2 rounded border border-purple-300 bg-purple-50 text-purple-800 text-sm font-medium hover:bg-purple-100"
+                        className="px-3 lg:px-4 py-1.5 lg:py-2 rounded border border-purple-300 bg-purple-50 text-purple-800 text-xs lg:text-sm font-medium hover:bg-purple-100"
                       >
                         Mark for Review &amp; Next
                       </button>
                       <button
                         type="button"
                         onClick={clearCurrentResponse}
-                        className="px-4 py-2 rounded border border-gray-300 bg-white text-gray-700 text-sm font-medium hover:bg-gray-50"
+                        className="px-3 lg:px-4 py-1.5 lg:py-2 rounded border border-gray-300 bg-white text-gray-700 text-xs lg:text-sm font-medium hover:bg-gray-50"
                       >
                         Clear Response
                       </button>
@@ -737,10 +982,12 @@ export default function TakeMockTestPage() {
                     <button
                       type="button"
                       onClick={() => goNext(false)}
-                      disabled={currentPos >= sectionQuestions.length - 1}
-                      className="px-5 py-2 rounded bg-[#00448a] hover:bg-[#003a76] text-white text-sm font-medium disabled:opacity-40"
+                      disabled={!canGoNext}
+                      className="px-4 lg:px-5 py-1.5 lg:py-2 rounded bg-[#00448a] hover:bg-[#003a76] text-white text-xs lg:text-sm font-medium disabled:opacity-40"
                     >
-                      Save &amp; Next
+                      {currentPos >= sectionQuestions.length - 1 && canContinueToCoding
+                        ? "Go to Coding"
+                        : "Save & Next"}
                     </button>
                   </div>
                 </div>
@@ -751,9 +998,9 @@ export default function TakeMockTestPage() {
           </div>
 
           {/* Right sidebar — question palette */}
-          <aside className="w-full sm:w-72 lg:w-80 shrink-0 border-l border-gray-300 bg-white flex flex-col overflow-hidden hidden sm:flex">
-            <div className="p-4 border-b bg-gradient-to-b from-gray-50 to-white">
-              <p className="text-xs text-gray-500 uppercase font-semibold">Question Palette</p>
+          <aside className="hidden sm:flex w-[13.5rem] lg:w-[13.75rem] xl:w-72 shrink-0 border-l border-gray-300 bg-white flex-col overflow-hidden">
+            <div className="p-3 lg:p-3 xl:p-4 border-b bg-gradient-to-b from-gray-50 to-white">
+              <p className="text-[10px] lg:text-xs text-gray-500 uppercase font-semibold">Question Palette</p>
               <p className="text-sm font-medium text-[#00448a] mt-1">
                 {activeSection}
                 {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""} ·{" "}
@@ -761,8 +1008,8 @@ export default function TakeMockTestPage() {
               </p>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4">
-              <div className="grid grid-cols-5 gap-2">
+            <div className="flex-1 overflow-y-auto p-3">
+              <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5 lg:gap-2">
                 {sectionQuestions.map(({ index }, localIdx) => {
                   const status = getStatus(index);
                   const isCurrent = index === currentIdx;
@@ -781,7 +1028,7 @@ export default function TakeMockTestPage() {
               </div>
 
               {/* Legend */}
-              <div className="mt-6 space-y-2 text-xs">
+              <div className="mt-4 space-y-1.5 text-[11px] lg:text-xs">
                 <p className="font-semibold text-gray-700 mb-2">Legend</p>
                 <div className="flex items-center gap-2">
                   <span className="h-4 w-4 rounded bg-green-500 shrink-0" />
@@ -806,13 +1053,17 @@ export default function TakeMockTestPage() {
               </div>
             </div>
 
-            <div className="p-4 border-t bg-gray-50 space-y-2">
+            <div className="p-3 border-t bg-gray-50 space-y-2">
               <button
                 type="button"
                 onClick={handleSubmit}
-                className="w-full py-2.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-semibold text-sm"
+                className={`w-full py-2.5 rounded-lg text-white font-semibold text-sm ${
+                  canContinueToCoding
+                    ? "bg-[#00448a] hover:bg-[#003a76]"
+                    : "bg-green-600 hover:bg-green-700"
+                }`}
               >
-                Submit Test
+                {canContinueToCoding ? "Go to Coding" : "Submit Test"}
               </button>
               {!allAnswered && (
                 <p className="text-[10px] text-center text-gray-500">
@@ -843,9 +1094,11 @@ export default function TakeMockTestPage() {
             <button
               type="button"
               onClick={handleSubmit}
-              className="h-9 px-4 shrink-0 rounded bg-green-600 text-white text-xs font-semibold"
+              className={`h-9 px-4 shrink-0 rounded text-white text-xs font-semibold ${
+                canContinueToCoding ? "bg-[#00448a]" : "bg-green-600"
+              }`}
             >
-              Submit
+              {canContinueToCoding ? "Coding" : "Submit"}
             </button>
           </div>
         </div>

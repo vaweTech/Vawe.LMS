@@ -7,13 +7,22 @@ export async function POST(req) {
 
   // Normalize output helper so UI can always read stdout/stderr/status
   const normalize = (payload) => {
+    const compileOutput = payload?.compile_output || "";
+    const stderr =
+      payload?.stderr ||
+      payload?.message ||
+      payload?.exception ||
+      compileOutput ||
+      "";
     return {
-      stdout: payload?.stdout || payload?.compile_output || "",
-      stderr: payload?.stderr || payload?.message || payload?.exception || "",
+      stdout: payload?.stdout || "",
+      stderr,
+      compile_output: compileOutput,
+      error: payload?.error || "",
       status:
         payload?.status?.description ||
         payload?.status ||
-        (payload?.stderr || payload?.exception ? "Error" : "Success"),
+        (stderr ? "Error" : "Success"),
       raw: payload || null,
     };
   };

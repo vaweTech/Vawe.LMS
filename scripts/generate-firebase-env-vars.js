@@ -86,7 +86,7 @@ FIREBASE_PRIVATE_KEY="${serviceAccount.private_key}"
   
 } catch (error) {
   console.error('❌ Error:', error.message);
-  console.error('\nMake sure serviceAccountKey.json exists in the project root.');
+  console.  error('\nMake sure serviceAccountKey.json exists in the project root.');
   process.exit(1);
 }
 

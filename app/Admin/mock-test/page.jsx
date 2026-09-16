@@ -11,7 +11,7 @@ import {
   slugFromMockTestLabel,
   updateMockTestGroup,
 } from "@/lib/mockTests";
-import { ChevronRight, ListChecks, Pencil, Plus, Trash2 } from "lucide-react";
+import { ChevronRight, ListChecks, Pencil, Plus, Trash2, Users } from "lucide-react";
 
 const emptyForm = { label: "", order: 0 };
 
@@ -48,7 +48,6 @@ export default function AdminMockTestGroupsPage() {
 
   useEffect(() => {
     loadGroups();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount
   }, []);
 
   async function handleCreate(e) {
@@ -249,6 +248,13 @@ export default function AdminMockTestGroupsPage() {
                               </p>
                             </div>
                             <div className="flex flex-wrap gap-2">
+                              <Link
+                                href={`/Admin/mock-test/${slug}/results`}
+                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border text-sm hover:bg-slate-50"
+                              >
+                                <Users className="h-4 w-4" />
+                                Test Results
+                              </Link>
                               <Link
                                 href={`/Admin/mock-test/${slug}`}
                                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#00448a] text-white hover:bg-[#003a76] text-sm"
