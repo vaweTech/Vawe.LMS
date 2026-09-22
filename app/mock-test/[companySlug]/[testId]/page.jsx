@@ -6,13 +6,17 @@ import { useParams, useRouter } from "next/navigation";
 import CheckAuth from "@/lib/CheckAuth";
 import { isAppleMobileDevice } from "@/lib/deviceDetect";
 import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import {
+  blockMockTestAccount,
   fetchMockTest,
+  fetchMockTestAccountBlock,
   fetchMockTestGroup,
   getMockQuestionSubSection,
   getMockSubSectionsForSection,
   isMockAnswerCorrect,
+  isMockTestAccountBlocked,
   isMockTestLocked,
   MOCK_JUDGE_LANGUAGES,
   normalizeMockQuestionOptions,
@@ -20,7 +24,7 @@ import {
   summarizeMockTestQuestions,
   transformMockCompilerInput,
 } from "@/lib/mockTests";
-import { useSecureExamSession } from "@/lib/useSecureExamSession";
+import { useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
 
 function SecureExamOverlays({
@@ -57,22 +61,34 @@ function SecureExamOverlays({
       )}
 
       {showTabWarning && started && (
-        <div
-          className={`fixed inset-0 z-[101] flex items-center justify-center p-4 ${
-            tabSwitchCount >= 2 ? "bg-red-700" : "bg-amber-600"
-          }`}
-        >
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 text-center">
-            <p className="text-xs font-bold uppercase tracking-wide mb-2 text-amber-700">
+        <div className="fixed inset-0 z-[101] flex items-center justify-center p-4 bg-black/60">
+          <div
+            className={`bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 text-center border-4 ${
+              tabSwitchCount >= 2 ? "border-red-600" : "border-orange-500"
+            }`}
+          >
+            <p
+              className={`text-xs font-bold uppercase tracking-wide mb-2 ${
+                tabSwitchCount >= 2 ? "text-red-700" : "text-orange-600"
+              }`}
+            >
               Warning {Math.min(tabSwitchCount, 3)} of 3
             </p>
             <h2 className="text-2xl font-bold text-gray-900 mb-4">
-              {tabSwitchCount <= 1 ? "Stay on this tab" : "Final warning"}
+              {tabSwitchCount <= 1 ? "Do not leave this tab" : "Final warning"}
             </h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Tab switching is not allowed. This counts as 1 warning.
+              The test is blocked after 3 switches.
+            </p>
             <button
               type="button"
               onClick={dismissTabWarning}
-              className="px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium"
+              className={`px-6 py-2.5 text-white rounded-lg font-medium ${
+                tabSwitchCount >= 2
+                  ? "bg-red-600 hover:bg-red-700"
+                  : "bg-orange-500 hover:bg-orange-600"
+              }`}
             >
               Continue test
             </button>
@@ -188,15 +204,71 @@ export default function TakeMockTestPage() {
   const [runResults, setRunResults] = useState({});
   const [runLoading, setRunLoading] = useState({});
   const [scoreDetail, setScoreDetail] = useState(null);
+  const [lockedAccount, setLockedAccount] = useState(null);
   const didInitPart = useRef(false);
 
   const companyLabel = groupLabel || String(companySlug || "").replace(/_/g, " ");
   const durationMinutes = Number(test?.durationMinutes) || 0;
 
+  const loadStudentProfile = useCallback(async (user) => {
+    let name = user?.displayName || "";
+    let email = user?.email || "";
+    if (user?.uid && db) {
+      try {
+        const [userSnap, studentSnap] = await Promise.all([
+          getDoc(doc(db, "users", user.uid)),
+          getDoc(doc(db, "students", user.uid)),
+        ]);
+        if (studentSnap.exists()) {
+          name = studentSnap.data()?.name || name;
+          email = studentSnap.data()?.email || email;
+        }
+        if (userSnap.exists()) {
+          name = userSnap.data()?.name || name;
+          email = userSnap.data()?.email || email;
+        }
+      } catch {
+        /* keep auth profile */
+      }
+    }
+    return { name, email };
+  }, []);
+
+  const persistAccountLock = useCallback(
+    async ({ reason, count }) => {
+      const user = auth?.currentUser;
+      if (!user?.uid || !companySlug || !testId) return;
+      try {
+        const { name, email } = await loadStudentProfile(user);
+        await blockMockTestAccount(companySlug, testId, {
+          userId: user.uid,
+          name,
+          email,
+          reason,
+          tabSwitchCount: count,
+        });
+        setLockedAccount({
+          userId: user.uid,
+          name,
+          email,
+          blocked: true,
+          reason,
+          tabSwitchCount: count,
+        });
+      } catch (e) {
+        console.error("Failed to lock mock test account:", e);
+      }
+    },
+    [companySlug, testId, loadStudentProfile]
+  );
+
   const secure = useSecureExamSession({
     durationMinutes,
-    onBlocked: ({ reason }) => alert(`Test blocked. ${reason}`),
+    onBlocked: ({ reason, count }) => {
+      persistAccountLock({ reason, count });
+    },
   });
+  useNoCopy({ enabled: secure.started && !submitted, allowEditable: true });
   const { markSubmitted, setOnTimeUp } = secure;
 
   const questions = useMemo(
@@ -444,6 +516,23 @@ export default function TakeMockTestPage() {
     };
   }, [companySlug, testId]);
 
+  useEffect(() => {
+    if (!companySlug || !testId || !auth) return undefined;
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user?.uid) {
+        setLockedAccount(null);
+        return;
+      }
+      try {
+        const block = await fetchMockTestAccountBlock(companySlug, testId, user.uid);
+        setLockedAccount(isMockTestAccountBlocked(block) ? block : null);
+      } catch (e) {
+        console.error("Failed to load mock test account lock:", e);
+      }
+    });
+    return () => unsub();
+  }, [companySlug, testId]);
+
   function goToQuestion(globalIdx) {
     setActiveIndex(globalIdx);
     setVisited((v) => ({ ...v, [globalIdx]: true }));
@@ -599,13 +688,15 @@ export default function TakeMockTestPage() {
     );
   }
 
-  if (secure.isBlocked) {
+  if (secure.isBlocked || lockedAccount) {
     return (
       <CheckAuth>
         <div className="min-h-dvh flex items-center justify-center bg-red-50 px-4">
           <div className="max-w-md w-full bg-white rounded-2xl border border-red-200 p-8 text-center">
-            <h1 className="text-xl font-bold text-red-900 mb-2">Test Blocked</h1>
-            <p className="text-sm text-red-700 mb-6">{secure.blockReason}</p>
+            <h1 className="text-xl font-bold text-red-900 mb-2">Account locked for this test</h1>
+            <p className="text-sm text-red-700 mb-6">
+              {lockedAccount?.reason || secure.blockReason || "This test is locked for your account after 3 tab switches. Ask an admin to unlock it."}
+            </p>
             <Link href={`/mock-test/${companySlug}`} className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white">
               Back to {companyLabel}
             </Link>
@@ -633,14 +724,34 @@ export default function TakeMockTestPage() {
               </div>
               <ul className="mt-6 list-disc pl-5 text-sm text-gray-700 space-y-1">
                 <li>One question at a time with side question palette.</li>
-                <li>Fullscreen mode (except iPhone/iPad).</li>
-                <li>3 tab switches block the test.</li>
+                <li>Fullscreen is required in Chrome to restrict tab switching.</li>
+                <li>Stay on this tab — 3 tab switches block the test.</li>
+                <li>Copying question text is not allowed.</li>
               </ul>
               <label className="mt-4 flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={secure.acceptedRules} onChange={(e) => secure.setAcceptedRules(e.target.checked)} />
                 I agree to the rules.
               </label>
-              <button type="button" onClick={() => secure.startExam()} disabled={!secure.acceptedRules} className="mt-5 px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium disabled:opacity-50">
+              <button
+                type="button"
+                onClick={async () => {
+                  const user = auth?.currentUser;
+                  if (user?.uid) {
+                    try {
+                      const block = await fetchMockTestAccountBlock(companySlug, testId, user.uid);
+                      if (isMockTestAccountBlocked(block)) {
+                        setLockedAccount(block);
+                        return;
+                      }
+                    } catch (e) {
+                      console.error("Failed to check mock test account lock:", e);
+                    }
+                  }
+                  secure.startExam();
+                }}
+                disabled={!secure.acceptedRules}
+                className="mt-5 px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium disabled:opacity-50"
+              >
                 Start Test
               </button>
             </div>
@@ -690,7 +801,7 @@ export default function TakeMockTestPage() {
         requestFullscreen={secure.requestFullscreen}
       />
 
-      <div className="fixed inset-0 z-[90] flex flex-col bg-[#eef2f7] min-h-dvh">
+      <div className="fixed inset-0 z-[90] flex flex-col bg-[#eef2f7] min-h-dvh select-none">
         {/* Top bar */}
         <div className="bg-[#00448a] text-white shrink-0">
           <div className="px-4 py-2 flex items-center justify-between gap-3">
@@ -918,7 +1029,7 @@ export default function TakeMockTestPage() {
                         <textarea
                           value={answers[currentIdx] ?? currentQ.starterCode ?? ""}
                           onChange={(e) => setAnswers((p) => ({ ...p, [currentIdx]: e.target.value }))}
-                          className="w-full flex-1 min-h-[180px] lg:min-h-0 border rounded-lg px-3 py-2 font-mono text-sm resize-y lg:resize-none"
+                          className="w-full flex-1 min-h-[180px] lg:min-h-0 border rounded-lg px-3 py-2 font-mono text-sm resize-y lg:resize-none select-text"
                           spellCheck={false}
                         />
                         {codingResults.length > 0 && (

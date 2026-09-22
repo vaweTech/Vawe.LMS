@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import CheckAuth from "@/lib/CheckAuth";
+import { useNoCopy } from "@/lib/useSecureExamSession";
 import {
   fetchMockTestGroup,
   fetchMockTestsForCompany,
@@ -26,6 +27,7 @@ export default function MockTestCompanyPage() {
   const [group, setGroup] = useState(null);
   const [groupLabel, setGroupLabel] = useState("");
   const [loading, setLoading] = useState(true);
+  useNoCopy({ enabled: true, allowEditable: false });
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +73,7 @@ export default function MockTestCompanyPage() {
 
   return (
     <CheckAuth>
-      <div className="min-h-dvh bg-gradient-to-br from-[#00448a]/5 via-sky-50 to-cyan-50 pt-20 md:pt-24 px-4 md:px-6 pb-10">
+      <div className="min-h-dvh bg-gradient-to-br from-[#00448a]/5 via-sky-50 to-cyan-50 pt-20 md:pt-24 px-4 md:px-6 pb-10 select-none">
         <div className="max-w-6xl mx-auto">
           <button
             type="button"

@@ -13,6 +13,7 @@ import {
   createMockTest,
   deleteMockTest,
   fetchMockTest,
+  fetchMockTestBlocks,
   fetchMockTestGroup,
   fetchMockTestsForCompany,
   getMockQuestionSubSection,
@@ -21,6 +22,7 @@ import {
   normalizeMockCompanyNames,
   sanitizeMockQuestions,
   summarizeMockTestQuestions,
+  unblockMockTestAccount,
   updateMockTest,
   updateMockTestGroup,
 } from "@/lib/mockTests";
@@ -37,6 +39,7 @@ import {
   Plus,
   Save,
   Settings2,
+  ShieldAlert,
   Trash2,
   Unlock,
   Upload,
@@ -52,6 +55,54 @@ const emptyTestForm = {
   order: 1,
   durationMinutes: 60,
 };
+
+function TestLockToggle({ locked, busy, onToggle }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={!locked}
+      aria-label={locked ? "Unlock test" : "Lock test"}
+      title={locked ? "Unlock test" : "Lock test"}
+      disabled={busy}
+      onClick={onToggle}
+      className={`relative inline-flex h-9 w-[88px] shrink-0 items-center rounded-full p-1 disabled:opacity-60 ${
+        locked ? "bg-rose-500" : "bg-emerald-500"
+      } transition-colors duration-300 ease-out`}
+    >
+      <span
+        className={`pointer-events-none absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-wide text-white transition-opacity duration-200 ${
+          locked ? "right-2.5 opacity-100" : "right-2.5 opacity-0"
+        }`}
+      >
+        Lock
+      </span>
+      <span
+        className={`pointer-events-none absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-wide text-white transition-opacity duration-200 ${
+          locked ? "left-2.5 opacity-0" : "left-2.5 opacity-100"
+        }`}
+      >
+        Open
+      </span>
+      <span
+        className={`relative z-10 flex h-7 w-7 items-center justify-center rounded-full bg-white shadow-md transition-transform duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${
+          locked ? "translate-x-0" : "translate-x-[52px]"
+        }`}
+      >
+        <Lock
+          className={`absolute h-3.5 w-3.5 text-rose-600 transition-all duration-300 ${
+            locked ? "scale-100 rotate-0 opacity-100" : "scale-50 -rotate-12 opacity-0"
+          }`}
+        />
+        <Unlock
+          className={`absolute h-3.5 w-3.5 text-emerald-600 transition-all duration-300 ${
+            locked ? "scale-50 rotate-12 opacity-0" : "scale-100 rotate-0 opacity-100"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
 
 function ensureDraftId(q, idx) {
   return {
@@ -319,6 +370,9 @@ export default function AdminMockTestCompanyPage() {
   const [saving, setSaving] = useState(false);
   const [lockingAll, setLockingAll] = useState(false);
   const [lockingTestId, setLockingTestId] = useState(null);
+  const [lockedAccountsByTest, setLockedAccountsByTest] = useState({});
+  const [unlockingAccountKey, setUnlockingAccountKey] = useState("");
+  const [lockedAccountsModalTestId, setLockedAccountsModalTestId] = useState(null);
   const [testForm, setTestForm] = useState(emptyTestForm);
   const [editingTestId, setEditingTestId] = useState(null);
   const [editMeta, setEditMeta] = useState(emptyTestForm);
@@ -447,6 +501,14 @@ export default function AdminMockTestCompanyPage() {
       ]);
       setGroup(groupData);
       setTests(testList);
+      const blockLists = await Promise.all(
+        testList.map((t) => fetchMockTestBlocks(companySlug, t.id).catch(() => []))
+      );
+      const byTest = {};
+      testList.forEach((t, i) => {
+        byTest[t.id] = blockLists[i] || [];
+      });
+      setLockedAccountsByTest(byTest);
     } catch (e) {
       console.error(e);
       alert(e?.message || "Failed to load mock tests.");
@@ -567,6 +629,29 @@ export default function AdminMockTestCompanyPage() {
       alert(err?.message || "Failed to update lock.");
     } finally {
       setLockingTestId(null);
+    }
+  }
+
+  async function handleUnlockAccount(test, account) {
+    const accountId = String(account?.userId || account?.id || "").trim();
+    if (!accountId) return;
+    const label = account?.name || account?.email || accountId;
+    if (!confirm(`Unlock "${label}" for this test? They will be allowed to take it again.`)) return;
+    const key = `${test.id}:${accountId}`;
+    setUnlockingAccountKey(key);
+    try {
+      await unblockMockTestAccount(companySlug, test.id, accountId);
+      setLockedAccountsByTest((prev) => {
+        const nextList = (prev[test.id] || []).filter(
+          (row) => String(row.userId || row.id) !== accountId
+        );
+        if (nextList.length === 0) setLockedAccountsModalTestId(null);
+        return { ...prev, [test.id]: nextList };
+      });
+    } catch (err) {
+      alert(err?.message || "Failed to unlock this account.");
+    } finally {
+      setUnlockingAccountKey("");
     }
   }
 
@@ -971,6 +1056,76 @@ export default function AdminMockTestCompanyPage() {
         </div>
       ) : null}
 
+      {lockedAccountsModalTestId ? (() => {
+        const modalTest = tests.find((t) => t.id === lockedAccountsModalTestId);
+        const modalAccounts = lockedAccountsByTest[lockedAccountsModalTestId] || [];
+        return (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/50">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="locked-accounts-title"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden"
+            >
+              <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 id="locked-accounts-title" className="text-lg font-bold text-slate-900">
+                    Locked accounts
+                  </h2>
+                  <p className="text-sm text-slate-500 mt-0.5 truncate">
+                    {modalTest?.title || "This test"} · {modalAccounts.length} locked
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLockedAccountsModalTestId(null)}
+                  className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"
+                  aria-label="Close"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+                {modalAccounts.length === 0 ? (
+                  <p className="p-6 text-sm text-slate-500 text-center">
+                    No locked accounts for this test.
+                  </p>
+                ) : (
+                  modalAccounts.map((account) => {
+                    const accountId = String(account.userId || account.id || "");
+                    const key = `${lockedAccountsModalTestId}:${accountId}`;
+                    return (
+                      <div key={accountId} className="flex items-center gap-3 px-5 py-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-slate-900 truncate">
+                            {account.name || account.email || accountId}
+                          </p>
+                          {account.email ? (
+                            <p className="text-xs text-slate-500 truncate">{account.email}</p>
+                          ) : null}
+                          <p className="text-[11px] text-orange-700 mt-0.5 truncate">
+                            {account.reason || "Locked after tab switches"}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleUnlockAccount(modalTest, account)}
+                          disabled={unlockingAccountKey === key || !modalTest}
+                          className="inline-flex items-center gap-1 h-9 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-60 shrink-0"
+                        >
+                          <Unlock className="h-4 w-4" />
+                          {unlockingAccountKey === key ? "…" : "Unlock"}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
+
       <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-50">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
           {!questionEditId ? (
@@ -1123,6 +1278,7 @@ export default function AdminMockTestCompanyPage() {
                         const summary = summarizeMockTestQuestions(test.questions);
                         const isEditingMeta = editingTestId === test.id;
                         const testLocked = isMockTestLocked(test, group);
+                        const lockedAccounts = lockedAccountsByTest[test.id] || [];
 
                         if (isEditingMeta) {
                           return (
@@ -1231,24 +1387,21 @@ export default function AdminMockTestCompanyPage() {
                                 </div>
                               </div>
                               <div className="flex items-center gap-1.5 shrink-0">
+                                <TestLockToggle
+                                  locked={testLocked}
+                                  busy={lockingTestId === test.id}
+                                  onToggle={() => handleToggleTestLock(test)}
+                                />
                                 <button
                                   type="button"
-                                  onClick={() => handleToggleTestLock(test)}
-                                  disabled={lockingTestId === test.id}
-                                  title={testLocked ? "Unlock" : "Lock"}
-                                  className={`inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl text-sm font-medium text-white disabled:opacity-60 ${
-                                    testLocked
-                                      ? "bg-emerald-600 hover:bg-emerald-700"
-                                      : "bg-slate-700 hover:bg-slate-800"
-                                  }`}
+                                  onClick={() => setLockedAccountsModalTestId(test.id)}
+                                  title="Locked accounts"
+                                  className="inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl border border-orange-200 bg-orange-50 text-orange-800 text-sm font-medium hover:bg-orange-100"
                                 >
-                                  {testLocked ? (
-                                    <Unlock className="h-4 w-4" />
-                                  ) : (
-                                    <Lock className="h-4 w-4" />
-                                  )}
-                                  <span className="hidden xl:inline">
-                                    {lockingTestId === test.id ? "…" : testLocked ? "Unlock" : "Lock"}
+                                  <ShieldAlert className="h-4 w-4" />
+                                  <span className="hidden lg:inline">Locked</span>
+                                  <span className="text-[11px] font-semibold">
+                                    {lockedAccounts.length}
                                   </span>
                                 </button>
                                 <Link
