@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import ExcelJS from "exceljs";
-import { doc, getDoc } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import CheckAdminAuth from "@/lib/CheckAdminAuth";
 import { db } from "@/lib/firebase";
 import { makeAuthenticatedRequest } from "@/lib/authUtils";
@@ -109,41 +109,110 @@ function formatSectionScore(s) {
   return `${Math.round(earned)}/${max} (${pct}%)`;
 }
 
-function buildSubjectWiseMarksText(row) {
-  const bySection = Object.values(sectionScoresForRow(row)).filter((s) => Number(s.max) > 0);
-  const source =
-    bySection.length > 0
-      ? bySection.sort((a, b) => String(a.section).localeCompare(String(b.section)))
-      : Object.values(subSectionScoresForRow(row))
-          .filter((s) => Number(s.max) > 0)
-          .sort((a, b) => {
-            const sec = String(a.section).localeCompare(String(b.section));
-            if (sec !== 0) return sec;
-            return String(a.subSection).localeCompare(String(b.subSection));
-          });
+function formatMarksPiece(label, earned, max, percent) {
+  const e = Math.round(Number(earned) || 0);
+  const m = Math.round(Number(max) || 0);
+  const pct =
+    percent != null && percent !== ""
+      ? Math.round(Number(percent) || 0)
+      : m > 0
+        ? Math.round((e / m) * 100)
+        : 0;
+  return `${label}: ${e}/${m} (${pct}%)`;
+}
 
-  if (!source.length) {
-    const parts = [];
-    if (Number(row.mcqTotal) > 0) {
-      parts.push(`MCQ: ${row.mcqCorrect ?? 0}/${row.mcqTotal} (${Math.round(((row.mcqCorrect || 0) / row.mcqTotal) * 100)}%)`);
+function buildSubjectWiseMarksText(row) {
+  const sections = Object.values(sectionScoresForRow(row))
+    .filter((s) => Number(s.max) > 0)
+    .sort((a, b) => String(a.section).localeCompare(String(b.section)));
+
+  const subSections = Object.values(subSectionScoresForRow(row))
+    .filter((s) => Number(s.max) > 0)
+    .sort((a, b) => {
+      const sec = String(a.section).localeCompare(String(b.section));
+      if (sec !== 0) return sec;
+      return String(a.subSection).localeCompare(String(b.subSection));
+    });
+
+  const meaningfulSubs = subSections.filter((s) => {
+    const sub = String(s.subSection || "").trim();
+    return sub && sub.toLowerCase() !== "general" && sub !== s.section;
+  });
+
+  // Prefer detailed sub-section breakdown when available
+  if (meaningfulSubs.length > 0) {
+    if (sections.length > 0) {
+      return sections
+        .map((sec) => {
+          const sectionName = String(sec.section || "General").trim() || "General";
+          const main = formatMarksPiece(sectionName, sec.earned, sec.max, sec.percent);
+          const kids = meaningfulSubs.filter(
+            (s) => String(s.section || "").trim() === sectionName
+          );
+          if (!kids.length) return main;
+          const detail = kids
+            .map((s) =>
+              formatMarksPiece(
+                String(s.subSection || "General").trim() || "General",
+                s.earned,
+                s.max,
+                s.percent
+              )
+            )
+            .join(", ");
+          return `${main} [${detail}]`;
+        })
+        .join(" | ");
     }
-    if (Number(row.codingMax) > 0) {
-      parts.push(
-        `Coding: ${Math.round(row.codingScore || 0)}/${row.codingMax} (${Math.round(((row.codingScore || 0) / row.codingMax) * 100)}%)`
-      );
-    }
-    return parts.join(" ") || "No section scores available";
+
+    return meaningfulSubs
+      .map((s) =>
+        formatMarksPiece(
+          s.label || `${s.section} › ${s.subSection}`,
+          s.earned,
+          s.max,
+          s.percent
+        )
+      )
+      .join(" | ");
   }
 
-  return source
-    .map((s) => {
-      const label = s.label || s.section || s.subSection || "General";
-      const earned = Math.round(Number(s.earned) || 0);
-      const max = Math.round(Number(s.max) || 0);
-      const pct = Number(s.percent) || (max > 0 ? Math.round((earned / max) * 100) : 0);
-      return `${label}: ${earned}/${max} (${pct}%)`;
-    })
-    .join(" ");
+  if (sections.length > 0) {
+    return sections
+      .map((s) => formatMarksPiece(s.section || "General", s.earned, s.max, s.percent))
+      .join(" | ");
+  }
+
+  if (subSections.length > 0) {
+    return subSections
+      .map((s) =>
+        formatMarksPiece(s.label || s.section || s.subSection || "General", s.earned, s.max, s.percent)
+      )
+      .join(" | ");
+  }
+
+  const parts = [];
+  if (Number(row.mcqTotal) > 0) {
+    parts.push(
+      formatMarksPiece(
+        "MCQ",
+        row.mcqCorrect ?? 0,
+        row.mcqTotal,
+        Math.round(((row.mcqCorrect || 0) / row.mcqTotal) * 100)
+      )
+    );
+  }
+  if (Number(row.codingMax) > 0) {
+    parts.push(
+      formatMarksPiece(
+        "Coding",
+        Math.round(row.codingScore || 0),
+        row.codingMax,
+        Math.round(((row.codingScore || 0) / row.codingMax) * 100)
+      )
+    );
+  }
+  return parts.join(" | ") || "No section scores available";
 }
 
 function buildOverallMarks(row) {
@@ -179,104 +248,115 @@ function buildMockResultWhatsAppParams(row) {
   ];
 }
 
-async function resolveRecipientForWhatsApp(userId) {
-  const uid = String(userId || "").trim();
+async function loadStudentDirectory() {
+  const byId = new Map();
+  const byEmail = new Map();
+  if (!db) return { byId, byEmail };
 
-  const pickPhone = (data) =>
-    String(data?.phone1 || data?.phone || data?.phone2 || data?.mobile || "").trim();
-
-  const collectRoles = (data) => {
-    if (!data) return [];
-    const roles = [];
-    if (data.role) roles.push(data.role);
-    if (Array.isArray(data.roles)) roles.push(...data.roles);
-    return roles.map((r) => String(r || "").trim()).filter(Boolean);
-  };
-
-  const isStaffRole = (role) => {
-    const value = String(role || "").trim().toLowerCase();
-    if (!value) return false;
-    if (
-      value === "admin" ||
-      value === "superadmin" ||
-      value === "collegeadmin" ||
-      value === "trainer" ||
-      value === "crttrainer" ||
-      value === "dataentry" ||
-      value === "manager" ||
-      value === "staff"
-    ) {
-      return true;
-    }
-    if (value.includes("trainer")) return true;
-    if (value.includes("admin") && !value.includes("student")) return true;
-    return false;
-  };
-
-  const isStudentLikeRole = (role) => {
-    const value = String(role || "").trim().toLowerCase();
-    if (!value) return false;
-    if (isStaffRole(role)) return false;
-    if (value === "student" || value === "internship") return true;
-    if (value.endsWith("student") || value.endsWith("internship") || value.endsWith("skillwins")) {
-      return true;
-    }
-    return false;
-  };
-
-  let studentData = null;
-  let userData = null;
-
-  if (uid && db) {
-    try {
-      const studentSnap = await getDoc(doc(db, "students", uid));
-      if (studentSnap.exists()) studentData = studentSnap.data();
-    } catch {
-      /* continue */
-    }
-    try {
-      const userSnap = await getDoc(doc(db, "users", uid));
-      if (userSnap.exists()) userData = userSnap.data();
-    } catch {
-      /* continue */
-    }
+  try {
+    const snap = await getDocs(collection(db, "students"));
+    snap.docs.forEach((d) => {
+      const data = d.data() || {};
+      byId.set(d.id, data);
+      const email = String(data.email || "").trim().toLowerCase();
+      if (email && !byEmail.has(email)) byEmail.set(email, data);
+    });
+  } catch {
+    /* empty directory */
   }
+  return { byId, byEmail };
+}
 
+async function loadUsersByIds(userIds) {
+  const byId = new Map();
+  if (!db || !userIds.length) return byId;
+
+  const unique = [...new Set(userIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  const chunkSize = 40;
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    await Promise.all(
+      chunk.map(async (uid) => {
+        try {
+          const snap = await getDoc(doc(db, "users", uid));
+          if (snap.exists()) byId.set(uid, snap.data());
+        } catch {
+          /* skip */
+        }
+      })
+    );
+  }
+  return byId;
+}
+
+function pickContactPhone(data) {
+  return String(data?.phone1 || data?.phone || data?.phone2 || data?.mobile || "").trim();
+}
+
+function collectRoles(data) {
+  if (!data) return [];
+  const roles = [];
+  if (data.role) roles.push(data.role);
+  if (Array.isArray(data.roles)) roles.push(...data.roles);
+  return roles.map((r) => String(r || "").trim()).filter(Boolean);
+}
+
+function isStaffRole(role) {
+  const value = String(role || "").trim().toLowerCase();
+  if (!value) return false;
+  if (
+    value === "admin" ||
+    value === "superadmin" ||
+    value === "collegeadmin" ||
+    value === "trainer" ||
+    value === "crttrainer" ||
+    value === "dataentry" ||
+    value === "manager" ||
+    value === "staff"
+  ) {
+    return true;
+  }
+  if (value.includes("trainer")) return true;
+  if (value.includes("admin") && !value.includes("student")) return true;
+  return false;
+}
+
+function buildRecipientInfo(studentData, userData) {
   const allRoles = [...collectRoles(userData), ...collectRoles(studentData)];
   if (allRoles.some(isStaffRole)) {
     return { phone: "", eligible: false, skipReason: "staff" };
   }
-
-  const hasStudentProfile = Boolean(studentData);
-  const hasStudentRole = allRoles.some(isStudentLikeRole);
-  if (!hasStudentProfile && !hasStudentRole) {
-    return { phone: "", eligible: false, skipReason: "not_student" };
-  }
-
-  const phone = pickPhone(studentData) || pickPhone(userData);
+  const phone = pickContactPhone(studentData) || pickContactPhone(userData);
   if (!phone) {
     return { phone: "", eligible: true, skipReason: "no_phone" };
   }
-
   return { phone, eligible: true, skipReason: "" };
 }
 
+/** One directory load + parallel user lookups — fast for large recipient lists. */
 async function resolveRecipientsForRows(list) {
-  const cache = new Map();
   const out = new Map();
-  await Promise.all(
-    list.map(async (row) => {
-      const key = String(row.userId || row.id || row.email || "");
-      if (!key) return;
-      if (cache.has(key)) {
-        out.set(key, cache.get(key));
-        return;
-      }
-      const info = await resolveRecipientForWhatsApp(row.userId || row.id);
-      cache.set(key, info);
-      out.set(key, info);
-    })
-  );
+  if (!list.length) return out;
+
+  const [{ byId: studentsById, byEmail: studentsByEmail }, usersById] = await Promise.all([
+    loadStudentDirectory(),
+    loadUsersByIds(list.map((row) => row.userId || row.id)),
+  ]);
+
+  for (const row of list) {
+    const key = String(row.userId || row.id || row.email || "");
+    if (!key || out.has(key)) continue;
+
+    const uid = String(row.userId || row.id || "").trim();
+    const mail = String(row.email || "").trim().toLowerCase();
+    const studentData =
+      (uid && studentsById.get(uid)) ||
+      (mail && studentsByEmail.get(mail)) ||
+      null;
+    const userData = (uid && usersById.get(uid)) || null;
+    out.set(key, buildRecipientInfo(studentData, userData));
+  }
+
   return out;
 }
 
@@ -696,15 +776,14 @@ function ResultsInner() {
       const recipientInfo = await resolveRecipientsForRows(list);
       let skippedNoPhone = 0;
       let skippedStaff = 0;
-      let skippedNotStudent = 0;
       const recipients = [];
 
       for (const row of list) {
         const key = String(row.userId || row.id || row.email || "");
-        const info = recipientInfo.get(key) || { phone: "", eligible: false, skipReason: "not_student" };
+        const info = recipientInfo.get(key) || { phone: "", eligible: false, skipReason: "no_phone" };
         if (!info.eligible) {
           if (info.skipReason === "staff") skippedStaff += 1;
-          else skippedNotStudent += 1;
+          else skippedNoPhone += 1;
           continue;
         }
         if (!info.phone) {
@@ -724,8 +803,8 @@ function ResultsInner() {
           [
             "No eligible students to message.",
             skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
-            skippedNotStudent ? `Skipped non-student: ${skippedNotStudent}` : null,
             skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
+            "Add the student phone in Student Info, then try again.",
           ]
             .filter(Boolean)
             .join("\n")
@@ -733,12 +812,13 @@ function ResultsInner() {
         return;
       }
 
+      const parallel = Math.min(40, Math.max(15, recipients.length));
       const res = await makeAuthenticatedRequest("/api/send-whatsapp-bulk", {
         method: "POST",
         body: JSON.stringify({
           template: MOCK_RESULT_WA_TEMPLATE,
           recipients,
-          concurrency: 8,
+          concurrency: parallel,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -756,7 +836,6 @@ function ResultsInner() {
           `WhatsApp sent: ${sent}/${recipients.length}`,
           failed ? `Failed: ${failed}` : null,
           skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
-          skippedNotStudent ? `Skipped non-student: ${skippedNotStudent}` : null,
           skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
           firstError || null,
         ]
