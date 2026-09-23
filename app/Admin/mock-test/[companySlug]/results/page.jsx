@@ -4,19 +4,28 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import ExcelJS from "exceljs";
+import { doc, getDoc } from "firebase/firestore";
 import CheckAdminAuth from "@/lib/CheckAdminAuth";
+import { db } from "@/lib/firebase";
+import { makeAuthenticatedRequest } from "@/lib/authUtils";
 import {
   fetchMockTestGroup,
   fetchMockTestGroupSubmissions,
   deleteMockTestResultsForCandidate,
   deleteMockTestSubmission,
   getMockTestCompanyLabel,
+  normalizeMockSectionScores,
+  normalizeMockSubSectionScores,
+  mockSubSectionScoreKey,
+  mockSubSectionScoreLabel,
+  getMockQuestionSubSection,
 } from "@/lib/mockTests";
 import { ResultsPageSkeleton } from "@/components/PageSkeleton";
 import {
   ArrowLeft,
   BarChart3,
   Download,
+  MessageCircle,
   Search,
   Trash2,
   Trophy,
@@ -35,6 +44,7 @@ import {
 } from "recharts";
 
 const PASS_MARK = 40;
+const MOCK_RESULT_WA_TEMPLATE = "mock_test_marks_students";
 
 function formatSubmittedAt(value) {
   if (!value) return "—";
@@ -47,6 +57,19 @@ function formatSubmittedAt(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatWhatsAppDate(value) {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) {
+    const now = new Date();
+    const dd = String(now.getDate()).padStart(2, "0");
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    return `${dd}/${mm}/${now.getFullYear()}`;
+  }
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
 }
 
 function scoreTone(percent) {
@@ -70,33 +93,191 @@ function avg(nums) {
 }
 
 function sectionScoresForRow(row) {
-  const map = {};
-  (row?.questionBreakdown || []).forEach((q) => {
-    const name = String(q.section || "General").trim() || "General";
-    if (!map[name]) {
-      map[name] = { section: name, correct: 0, total: 0, codingEarned: 0, codingMax: 0 };
-    }
-    if (q.type === "coding") {
-      map[name].codingMax += Number(q.maxScore) || 0;
-      map[name].codingEarned += Number(q.score) || 0;
-    } else {
-      map[name].total += 1;
-      if (q.correct) map[name].correct += 1;
-    }
-  });
-  return map;
+  return normalizeMockSectionScores(row?.sectionScores, row?.questionBreakdown);
+}
+
+function subSectionScoresForRow(row) {
+  return normalizeMockSubSectionScores(row?.subSectionScores, row?.questionBreakdown);
 }
 
 function formatSectionScore(s) {
-  if (!s) return "—";
-  const parts = [];
-  if (s.total) parts.push(`${s.correct}/${s.total}`);
-  if (s.codingMax) parts.push(`${Math.round(s.codingEarned)}/${s.codingMax}`);
-  if (!parts.length) return "—";
-  const earned = (s.correct || 0) + (Number(s.codingEarned) || 0);
-  const max = (s.total || 0) + (Number(s.codingMax) || 0);
-  const pct = max > 0 ? Math.round((earned / max) * 100) : null;
-  return pct == null ? parts.join(" · ") : `${parts.join(" · ")} (${pct}%)`;
+  if (!s || !(s.max || s.total || s.codingMax)) return "—";
+  const earned = Number(s.earned != null ? s.earned : (s.correct || 0) + (Number(s.codingEarned) || 0));
+  const max = Number(s.max != null ? s.max : (s.total || 0) + (Number(s.codingMax) || 0));
+  if (max <= 0) return "—";
+  const pct = s.percent != null ? Math.round(Number(s.percent) || 0) : Math.round((earned / max) * 100);
+  return `${Math.round(earned)}/${max} (${pct}%)`;
+}
+
+function buildSubjectWiseMarksText(row) {
+  const bySection = Object.values(sectionScoresForRow(row)).filter((s) => Number(s.max) > 0);
+  const source =
+    bySection.length > 0
+      ? bySection.sort((a, b) => String(a.section).localeCompare(String(b.section)))
+      : Object.values(subSectionScoresForRow(row))
+          .filter((s) => Number(s.max) > 0)
+          .sort((a, b) => {
+            const sec = String(a.section).localeCompare(String(b.section));
+            if (sec !== 0) return sec;
+            return String(a.subSection).localeCompare(String(b.subSection));
+          });
+
+  if (!source.length) {
+    const parts = [];
+    if (Number(row.mcqTotal) > 0) {
+      parts.push(`MCQ: ${row.mcqCorrect ?? 0}/${row.mcqTotal} (${Math.round(((row.mcqCorrect || 0) / row.mcqTotal) * 100)}%)`);
+    }
+    if (Number(row.codingMax) > 0) {
+      parts.push(
+        `Coding: ${Math.round(row.codingScore || 0)}/${row.codingMax} (${Math.round(((row.codingScore || 0) / row.codingMax) * 100)}%)`
+      );
+    }
+    return parts.join(" ") || "No section scores available";
+  }
+
+  return source
+    .map((s) => {
+      const label = s.label || s.section || s.subSection || "General";
+      const earned = Math.round(Number(s.earned) || 0);
+      const max = Math.round(Number(s.max) || 0);
+      const pct = Number(s.percent) || (max > 0 ? Math.round((earned / max) * 100) : 0);
+      return `${label}: ${earned}/${max} (${pct}%)`;
+    })
+    .join(" ");
+}
+
+function buildOverallMarks(row) {
+  const bySection = Object.values(sectionScoresForRow(row));
+  let earned = bySection.reduce((sum, s) => sum + (Number(s.earned) || 0), 0);
+  let max = bySection.reduce((sum, s) => sum + (Number(s.max) || 0), 0);
+  if (max <= 0) {
+    earned = (Number(row.mcqCorrect) || 0) + (Number(row.codingScore) || 0);
+    max = (Number(row.mcqTotal) || 0) + (Number(row.codingMax) || 0);
+  }
+  return {
+    earned: Math.round(earned * 10) / 10,
+    max: Math.round(max * 10) / 10,
+    percent:
+      row.percent != null
+        ? Math.round((Number(row.percent) || 0) * 10) / 10
+        : max > 0
+          ? Math.round((earned / max) * 1000) / 10
+          : 0,
+  };
+}
+
+/** Template: mock_test_marks_students — {{1}} name, {{2}} test, {{3}} date, {{4}} subjects, {{5}} total, {{6}} % */
+function buildMockResultWhatsAppParams(row) {
+  const overall = buildOverallMarks(row);
+  return [
+    String(row.name || "Student").trim() || "Student",
+    String(row.testTitle || row.testId || "Mock Test").trim() || "Mock Test",
+    formatWhatsAppDate(row.submittedAt),
+    buildSubjectWiseMarksText(row),
+    `${overall.earned}/${overall.max}`,
+    String(overall.percent),
+  ];
+}
+
+async function resolveRecipientForWhatsApp(userId) {
+  const uid = String(userId || "").trim();
+
+  const pickPhone = (data) =>
+    String(data?.phone1 || data?.phone || data?.phone2 || data?.mobile || "").trim();
+
+  const collectRoles = (data) => {
+    if (!data) return [];
+    const roles = [];
+    if (data.role) roles.push(data.role);
+    if (Array.isArray(data.roles)) roles.push(...data.roles);
+    return roles.map((r) => String(r || "").trim()).filter(Boolean);
+  };
+
+  const isStaffRole = (role) => {
+    const value = String(role || "").trim().toLowerCase();
+    if (!value) return false;
+    if (
+      value === "admin" ||
+      value === "superadmin" ||
+      value === "collegeadmin" ||
+      value === "trainer" ||
+      value === "crttrainer" ||
+      value === "dataentry" ||
+      value === "manager" ||
+      value === "staff"
+    ) {
+      return true;
+    }
+    if (value.includes("trainer")) return true;
+    if (value.includes("admin") && !value.includes("student")) return true;
+    return false;
+  };
+
+  const isStudentLikeRole = (role) => {
+    const value = String(role || "").trim().toLowerCase();
+    if (!value) return false;
+    if (isStaffRole(role)) return false;
+    if (value === "student" || value === "internship") return true;
+    if (value.endsWith("student") || value.endsWith("internship") || value.endsWith("skillwins")) {
+      return true;
+    }
+    return false;
+  };
+
+  let studentData = null;
+  let userData = null;
+
+  if (uid && db) {
+    try {
+      const studentSnap = await getDoc(doc(db, "students", uid));
+      if (studentSnap.exists()) studentData = studentSnap.data();
+    } catch {
+      /* continue */
+    }
+    try {
+      const userSnap = await getDoc(doc(db, "users", uid));
+      if (userSnap.exists()) userData = userSnap.data();
+    } catch {
+      /* continue */
+    }
+  }
+
+  const allRoles = [...collectRoles(userData), ...collectRoles(studentData)];
+  if (allRoles.some(isStaffRole)) {
+    return { phone: "", eligible: false, skipReason: "staff" };
+  }
+
+  const hasStudentProfile = Boolean(studentData);
+  const hasStudentRole = allRoles.some(isStudentLikeRole);
+  if (!hasStudentProfile && !hasStudentRole) {
+    return { phone: "", eligible: false, skipReason: "not_student" };
+  }
+
+  const phone = pickPhone(studentData) || pickPhone(userData);
+  if (!phone) {
+    return { phone: "", eligible: true, skipReason: "no_phone" };
+  }
+
+  return { phone, eligible: true, skipReason: "" };
+}
+
+async function resolveRecipientsForRows(list) {
+  const cache = new Map();
+  const out = new Map();
+  await Promise.all(
+    list.map(async (row) => {
+      const key = String(row.userId || row.id || row.email || "");
+      if (!key) return;
+      if (cache.has(key)) {
+        out.set(key, cache.get(key));
+        return;
+      }
+      const info = await resolveRecipientForWhatsApp(row.userId || row.id);
+      cache.set(key, info);
+      out.set(key, info);
+    })
+  );
+  return out;
 }
 
 function ResultsInner() {
@@ -113,6 +294,8 @@ function ResultsInner() {
   const [sortBy, setSortBy] = useState("recent");
   const [detail, setDetail] = useState(null);
   const [deletingKey, setDeletingKey] = useState("");
+  const [waSending, setWaSending] = useState(false);
+  const [waSendingRowKey, setWaSendingRowKey] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +359,52 @@ function ResultsInner() {
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [rows, tests, testFilter]);
 
+  const subSectionColumns = useMemo(() => {
+    const map = new Map();
+    const add = (section, subSection) => {
+      const sec = String(section || "General").trim() || "General";
+      const sub = String(subSection || "General").trim() || "General";
+      const key = mockSubSectionScoreKey(sec, sub);
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          section: sec,
+          subSection: sub,
+          label: mockSubSectionScoreLabel(sec, sub),
+        });
+      }
+    };
+    rows.forEach((r) => {
+      Object.values(subSectionScoresForRow(r)).forEach((s) => {
+        add(s.section, s.subSection);
+      });
+    });
+    const selected = tests.find((t) => t.id === testFilter);
+    const sourceTests = testFilter === "all" ? tests : selected ? [selected] : tests;
+    sourceTests.forEach((t) => {
+      (Array.isArray(t.questions) ? t.questions : []).forEach((q) => {
+        const sec = String(q?.section || "").trim();
+        if (!sec) return;
+        add(sec, getMockQuestionSubSection(q) || "General");
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => {
+      const sec = a.section.localeCompare(b.section);
+      if (sec !== 0) return sec;
+      return a.subSection.localeCompare(b.subSection);
+    });
+  }, [rows, tests, testFilter]);
+
+  const scoreColumns = useMemo(
+    () => (subSectionColumns.length > 0 ? subSectionColumns : sectionColumns.map((s) => ({
+      key: s,
+      section: s,
+      subSection: s,
+      label: s,
+    }))),
+    [subSectionColumns, sectionColumns]
+  );
+
   const stats = useMemo(() => {
     const percents = rows.map((r) => Number(r.percent) || 0);
     const uniqueStudents = new Set(rows.map((r) => r.userId || r.email || r.id)).size;
@@ -236,25 +465,74 @@ function ResultsInner() {
   const sectionAnalytics = useMemo(() => {
     const map = {};
     rows.forEach((r) => {
-      (r.questionBreakdown || []).forEach((q) => {
-        const key = q.section || "General";
-        if (!map[key]) map[key] = { section: key, correct: 0, total: 0, codingEarned: 0, codingMax: 0 };
-        if (q.type === "mcq") {
-          map[key].total += 1;
-          if (q.correct) map[key].correct += 1;
-        } else {
-          map[key].codingMax += Number(q.maxScore) || 0;
-          map[key].codingEarned += Number(q.score) || 0;
+      Object.values(sectionScoresForRow(r)).forEach((s) => {
+        const key = s.section || "General";
+        if (!map[key]) {
+          map[key] = {
+            section: key,
+            correct: 0,
+            total: 0,
+            codingEarned: 0,
+            codingMax: 0,
+            earned: 0,
+            max: 0,
+          };
         }
+        map[key].correct += Number(s.correct) || 0;
+        map[key].total += Number(s.total) || 0;
+        map[key].codingEarned += Number(s.codingEarned) || 0;
+        map[key].codingMax += Number(s.codingMax) || 0;
+        map[key].earned += Number(s.earned) || 0;
+        map[key].max += Number(s.max) || 0;
       });
     });
     return Object.values(map)
       .map((s) => ({
         ...s,
+        percent: s.max > 0 ? Math.round((s.earned / s.max) * 100) : 0,
         mcqPct: s.total ? Math.round((s.correct / s.total) * 100) : null,
         codingPct: s.codingMax ? Math.round((s.codingEarned / s.codingMax) * 100) : null,
       }))
-      .sort((a, b) => (a.mcqPct ?? 999) - (b.mcqPct ?? 999));
+      .sort((a, b) => a.section.localeCompare(b.section));
+  }, [rows]);
+
+  const subSectionAnalytics = useMemo(() => {
+    const map = {};
+    rows.forEach((r) => {
+      Object.values(subSectionScoresForRow(r)).forEach((s) => {
+        const key = s.key || mockSubSectionScoreKey(s.section, s.subSection);
+        if (!map[key]) {
+          map[key] = {
+            key,
+            section: s.section || "General",
+            subSection: s.subSection || "General",
+            label: s.label || mockSubSectionScoreLabel(s.section, s.subSection),
+            correct: 0,
+            total: 0,
+            codingEarned: 0,
+            codingMax: 0,
+            earned: 0,
+            max: 0,
+          };
+        }
+        map[key].correct += Number(s.correct) || 0;
+        map[key].total += Number(s.total) || 0;
+        map[key].codingEarned += Number(s.codingEarned) || 0;
+        map[key].codingMax += Number(s.codingMax) || 0;
+        map[key].earned += Number(s.earned) || 0;
+        map[key].max += Number(s.max) || 0;
+      });
+    });
+    return Object.values(map)
+      .map((s) => ({
+        ...s,
+        percent: s.max > 0 ? Math.round((s.earned / s.max) * 100) : 0,
+      }))
+      .sort((a, b) => {
+        const sec = a.section.localeCompare(b.section);
+        if (sec !== 0) return sec;
+        return a.subSection.localeCompare(b.subSection);
+      });
   }, [rows]);
 
   const weakQuestions = useMemo(() => {
@@ -294,11 +572,13 @@ function ResultsInner() {
       "MCQ",
       "Coding",
       ...sectionColumns.map((s) => s),
+      ...subSectionColumns.map((s) => s.label),
       "Score %",
       "Submitted",
     ]);
     rows.forEach((r) => {
       const bySection = sectionScoresForRow(r);
+      const bySub = subSectionScoresForRow(r);
       ws.addRow([
         r.name || "",
         r.email || "",
@@ -306,6 +586,7 @@ function ResultsInner() {
         `${r.mcqCorrect ?? 0}/${r.mcqTotal ?? 0}`,
         r.codingMax ? `${Math.round(r.codingScore || 0)}/${r.codingMax}` : "",
         ...sectionColumns.map((s) => formatSectionScore(bySection[s])),
+        ...subSectionColumns.map((s) => formatSectionScore(bySub[s.key])),
         r.percent ?? 0,
         formatSubmittedAt(r.submittedAt),
       ]);
@@ -391,6 +672,106 @@ function ResultsInner() {
     }
   }
 
+  async function sendWhatsAppResults(targetRows, { single = false } = {}) {
+    const list = Array.isArray(targetRows) ? targetRows.filter(Boolean) : [];
+    if (!list.length) {
+      alert("No results to send.");
+      return;
+    }
+
+    const ok = confirm(
+      single
+        ? `Send WhatsApp result to ${candidateLabel(list[0])}?`
+        : `Send WhatsApp results to ${list.length} student${list.length === 1 ? "" : "s"} (current filter)?`
+    );
+    if (!ok) return;
+
+    if (single) {
+      setWaSendingRowKey(`${list[0].testId}-${list[0].id || list[0].userId}`);
+    } else {
+      setWaSending(true);
+    }
+
+    try {
+      const recipientInfo = await resolveRecipientsForRows(list);
+      let skippedNoPhone = 0;
+      let skippedStaff = 0;
+      let skippedNotStudent = 0;
+      const recipients = [];
+
+      for (const row of list) {
+        const key = String(row.userId || row.id || row.email || "");
+        const info = recipientInfo.get(key) || { phone: "", eligible: false, skipReason: "not_student" };
+        if (!info.eligible) {
+          if (info.skipReason === "staff") skippedStaff += 1;
+          else skippedNotStudent += 1;
+          continue;
+        }
+        if (!info.phone) {
+          skippedNoPhone += 1;
+          continue;
+        }
+        recipients.push({
+          id: row.userId || row.id || null,
+          name: row.name || "Student",
+          phone: info.phone,
+          bodyParams: buildMockResultWhatsAppParams(row),
+        });
+      }
+
+      if (!recipients.length) {
+        alert(
+          [
+            "No eligible students to message.",
+            skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
+            skippedNotStudent ? `Skipped non-student: ${skippedNotStudent}` : null,
+            skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n")
+        );
+        return;
+      }
+
+      const res = await makeAuthenticatedRequest("/api/send-whatsapp-bulk", {
+        method: "POST",
+        body: JSON.stringify({
+          template: MOCK_RESULT_WA_TEMPLATE,
+          recipients,
+          concurrency: 8,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || data.details || "Failed to send WhatsApp messages");
+      }
+
+      const sent = Number(data.sent || 0);
+      const failed = Number(data.failed || 0);
+      const firstError = Array.isArray(data.errors) && data.errors[0]?.error
+        ? `\nFirst error: ${data.errors[0].error}`
+        : "";
+      alert(
+        [
+          `WhatsApp sent: ${sent}/${recipients.length}`,
+          failed ? `Failed: ${failed}` : null,
+          skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
+          skippedNotStudent ? `Skipped non-student: ${skippedNotStudent}` : null,
+          skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
+          firstError || null,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+    } catch (err) {
+      console.error("Send mock test WhatsApp failed:", err);
+      alert(err?.message || "Failed to send WhatsApp results.");
+    } finally {
+      setWaSending(false);
+      setWaSendingRowKey("");
+    }
+  }
+
   const selectedTest = tests.find((t) => t.id === testFilter);
 
   return (
@@ -417,15 +798,26 @@ function ResultsInner() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={downloadExcel}
-            disabled={!rows.length}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76] disabled:opacity-50"
-          >
-            <Download className="h-4 w-4" />
-            Download Excel
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => sendWhatsAppResults(rows)}
+              disabled={!rows.length || waSending || !!waSendingRowKey}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+            >
+              <MessageCircle className="h-4 w-4" />
+              {waSending ? "Sending…" : "Send WhatsApp"}
+            </button>
+            <button
+              type="button"
+              onClick={downloadExcel}
+              disabled={!rows.length}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76] disabled:opacity-50"
+            >
+              <Download className="h-4 w-4" />
+              Download Excel
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap gap-3 mb-6">
@@ -560,22 +952,91 @@ function ResultsInner() {
 
             {sectionAnalytics.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-6">
-                <h2 className="font-semibold text-slate-900 mb-3">Section-wise accuracy</h2>
+                <h2 className="font-semibold text-slate-900 mb-1">Section-wise scores</h2>
+                <p className="text-xs text-slate-500 mb-3">Average score, total marks, and accuracy by section</p>
+                <div className="h-[224px] w-full min-w-0 mb-4">
+                  <ResponsiveContainer width="100%" height={224} minWidth={0} minHeight={0}>
+                    <BarChart data={sectionAnalytics}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="section" tick={{ fontSize: 12 }} interval={0} />
+                      <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                      <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
+                      <Bar dataKey="percent" fill="#00448a" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-slate-500">
                         <th className="py-2">Section</th>
-                        <th className="py-2">MCQ</th>
-                        <th className="py-2">Coding</th>
+                        <th className="py-2 text-center">Score</th>
+                        <th className="py-2 text-center">Total</th>
+                        <th className="py-2 text-right">Avg %</th>
                       </tr>
                     </thead>
                     <tbody>
                       {sectionAnalytics.map((s) => (
                         <tr key={s.section} className="border-t">
                           <td className="py-2 font-medium">{s.section}</td>
-                          <td className="py-2">{s.mcqPct == null ? "—" : `${s.mcqPct}% (${s.correct}/${s.total})`}</td>
-                          <td className="py-2">{s.codingPct == null ? "—" : `${s.codingPct}%`}</td>
+                          <td className="py-2 text-center">{Math.round(s.earned)}</td>
+                          <td className="py-2 text-center">{Math.round(s.max)}</td>
+                          <td className="py-2 text-right">
+                            <ScoreBadge value={s.percent} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {subSectionAnalytics.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-6">
+                <h2 className="font-semibold text-slate-900 mb-1">Sub-section-wise scores</h2>
+                <p className="text-xs text-slate-500 mb-3">
+                  Score / total / % for each sub-section inside a section
+                </p>
+                <div className="h-[240px] w-full min-w-0 mb-4">
+                  <ResponsiveContainer width="100%" height={240} minWidth={0} minHeight={0}>
+                    <BarChart data={subSectionAnalytics}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fontSize: 11 }}
+                        interval={0}
+                        angle={-20}
+                        textAnchor="end"
+                        height={60}
+                      />
+                      <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
+                      <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
+                      <Bar dataKey="percent" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-slate-500">
+                        <th className="py-2">Section</th>
+                        <th className="py-2">Sub-section</th>
+                        <th className="py-2 text-center">Score</th>
+                        <th className="py-2 text-center">Total</th>
+                        <th className="py-2 text-right">Avg %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {subSectionAnalytics.map((s) => (
+                        <tr key={s.key} className="border-t">
+                          <td className="py-2 font-medium">{s.section}</td>
+                          <td className="py-2 text-slate-700">{s.subSection}</td>
+                          <td className="py-2 text-center">{Math.round(s.earned)}</td>
+                          <td className="py-2 text-center">{Math.round(s.max)}</td>
+                          <td className="py-2 text-right">
+                            <ScoreBadge value={s.percent} />
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -616,14 +1077,12 @@ function ResultsInner() {
                       <th className="px-4 py-3 font-semibold">Name</th>
                       <th className="px-4 py-3 font-semibold">Email</th>
                       <th className="px-4 py-3 font-semibold">Test</th>
-                      {sectionColumns.map((section) => (
-                        <th key={section} className="px-4 py-3 font-semibold whitespace-nowrap">
-                          {section}
+                      {scoreColumns.map((col) => (
+                        <th key={col.key} className="px-4 py-3 font-semibold whitespace-nowrap">
+                          {col.label}
                         </th>
                       ))}
-                      <th className="px-4 py-3 font-semibold">MCQ</th>
-                      <th className="px-4 py-3 font-semibold">Coding</th>
-                      <th className="px-4 py-3 font-semibold">Score</th>
+                      <th className="px-4 py-3 font-semibold">Total</th>
                       <th className="px-4 py-3 font-semibold">Submitted</th>
                       <th className="px-4 py-3 font-semibold text-right">Actions</th>
                     </tr>
@@ -631,6 +1090,7 @@ function ResultsInner() {
                   <tbody>
                     {rows.map((row) => {
                       const bySection = sectionScoresForRow(row);
+                      const bySub = subSectionScoresForRow(row);
                       const submissionId = row.id || row.userId;
                       const rowKey = `${row.testId}-${submissionId}`;
                       return (
@@ -644,24 +1104,43 @@ function ResultsInner() {
                         </td>
                         <td className="px-4 py-3 text-slate-600">{row.email || "—"}</td>
                         <td className="px-4 py-3 text-slate-700">{row.testTitle || row.testId}</td>
-                        {sectionColumns.map((section) => (
-                          <td key={section} className="px-4 py-3 whitespace-nowrap text-slate-700">
-                            {formatSectionScore(bySection[section])}
-                          </td>
-                        ))}
-                        <td className="px-4 py-3">
-                          {row.mcqCorrect ?? 0} / {row.mcqTotal ?? 0}
-                        </td>
-                        <td className="px-4 py-3">
-                          {row.codingMax
-                            ? `${Math.round(row.codingScore || 0)} / ${row.codingMax}`
-                            : "—"}
-                        </td>
+                        {scoreColumns.map((col) => {
+                          const cell =
+                            subSectionColumns.length > 0
+                              ? bySub[col.key]
+                              : bySection[col.key];
+                          return (
+                            <td key={col.key} className="px-4 py-3 whitespace-nowrap">
+                              {cell ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-slate-700">
+                                    {Math.round(cell.earned)}/{cell.max}
+                                  </span>
+                                  <ScoreBadge value={cell.percent} />
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                          );
+                        })}
                         <td className="px-4 py-3">
                           <ScoreBadge value={row.percent} />
                         </td>
                         <td className="px-4 py-3 text-slate-600">{formatSubmittedAt(row.submittedAt)}</td>
                         <td className="px-4 py-3 text-right whitespace-nowrap">
+                          <button
+                            type="button"
+                            title="Send WhatsApp result"
+                            disabled={waSending || !!waSendingRowKey || !!deletingKey}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              sendWhatsAppResults([row], { single: true });
+                            }}
+                            className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 mr-1"
+                          >
+                            <MessageCircle className="h-4 w-4" />
+                          </button>
                           <button
                             type="button"
                             title="Delete this result"
@@ -679,7 +1158,7 @@ function ResultsInner() {
                 </table>
               </div>
               <p className="px-5 py-3 text-xs text-slate-500">
-                Click a row for question-level detail. Use the trash icon to delete that candidate’s result.
+              Click a row for section and sub-section scores. Use the trash icon to delete that candidate’s result.
               </p>
             </div>
           </>
@@ -714,18 +1193,68 @@ function ResultsInner() {
               <p className="text-xs text-slate-500">Submitted {formatSubmittedAt(detail.submittedAt)}</p>
               {Object.keys(sectionScoresForRow(detail)).length > 0 && (
                 <div>
-                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Section-wise result</h4>
-                  <div className="space-y-2">
-                    {Object.values(sectionScoresForRow(detail)).map((s) => (
-                      <div
-                        key={s.section}
-                        className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm"
-                      >
-                        <span className="font-medium text-slate-800">{s.section}</span>
-                        <span className="text-slate-700">{formatSectionScore(s)}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Section-wise scores</h4>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-slate-500">
+                        <th className="py-2">Section</th>
+                        <th className="py-2 text-center">Score</th>
+                        <th className="py-2 text-center">Total</th>
+                        <th className="py-2 text-right">%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.values(sectionScoresForRow(detail)).map((s) => (
+                        <tr key={s.section} className="border-t border-slate-100">
+                          <td className="py-2 font-medium text-slate-800">{s.section}</td>
+                          <td className="py-2 text-center text-[#00448a] font-semibold">
+                            {Math.round(s.earned)}
+                          </td>
+                          <td className="py-2 text-center text-slate-600">{Math.round(s.max)}</td>
+                          <td className="py-2 text-right">
+                            <ScoreBadge value={s.percent} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {Object.keys(subSectionScoresForRow(detail)).length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Sub-section-wise scores</h4>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-slate-500">
+                        <th className="py-2">Section</th>
+                        <th className="py-2">Sub-section</th>
+                        <th className="py-2 text-center">Score</th>
+                        <th className="py-2 text-center">Total</th>
+                        <th className="py-2 text-right">%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.values(subSectionScoresForRow(detail))
+                        .sort((a, b) => {
+                          const sec = String(a.section).localeCompare(String(b.section));
+                          if (sec !== 0) return sec;
+                          return String(a.subSection).localeCompare(String(b.subSection));
+                        })
+                        .map((s) => (
+                          <tr key={s.key || `${s.section}-${s.subSection}`} className="border-t border-slate-100">
+                            <td className="py-2 font-medium text-slate-800">{s.section}</td>
+                            <td className="py-2 text-slate-700">{s.subSection}</td>
+                            <td className="py-2 text-center text-[#00448a] font-semibold">
+                              {Math.round(s.earned)}
+                            </td>
+                            <td className="py-2 text-center text-slate-600">{Math.round(s.max)}</td>
+                            <td className="py-2 text-right">
+                              <ScoreBadge value={s.percent} />
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
               {Array.isArray(detail.questionBreakdown) && detail.questionBreakdown.length > 0 ? (
@@ -744,8 +1273,8 @@ function ResultsInner() {
                       }`}
                     >
                       {q.type === "mcq"
-                        ? `Q${q.i + 1} MCQ · ${q.section}${q.unanswered ? " · skipped" : q.correct ? " · correct" : " · wrong"}`
-                        : `Q${q.i + 1} Coding · ${q.section} · ${q.passed || 0}/${q.totalCases || 0} cases`}
+                        ? `Q${q.i + 1} MCQ · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""}${q.unanswered ? " · skipped" : q.correct ? " · correct" : " · wrong"}`
+                        : `Q${q.i + 1} Coding · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""} · ${q.passed || 0}/${q.totalCases || 0} cases`}
                     </li>
                   ))}
                 </ul>
@@ -755,6 +1284,18 @@ function ResultsInner() {
                 </p>
               )}
               <div className="pt-2 flex flex-wrap gap-2 border-t">
+                <button
+                  type="button"
+                  disabled={waSending || !!waSendingRowKey || !!deletingKey}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    sendWhatsAppResults([detail], { single: true });
+                  }}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-200 text-emerald-700 text-sm hover:bg-emerald-50 disabled:opacity-50"
+                >
+                  <MessageCircle className="h-4 w-4" />
+                  {waSendingRowKey ? "Sending…" : "Send WhatsApp"}
+                </button>
                 <button
                   type="button"
                   disabled={!!deletingKey}

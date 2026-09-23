@@ -23,6 +23,8 @@ import {
   saveMockTestSubmission,
   summarizeMockTestQuestions,
   transformMockCompilerInput,
+  buildMockSectionScores,
+  buildMockSubSectionScores,
 } from "@/lib/mockTests";
 import { useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
@@ -466,6 +468,8 @@ export default function TakeMockTestPage() {
           mcqAnswered,
           codingAttempted,
           questionBreakdown,
+          sectionScores: buildMockSectionScores(questionBreakdown),
+          subSectionScores: buildMockSubSectionScores(questionBreakdown),
         });
       } catch (e) {
         console.error("Failed to save mock test result:", e);
