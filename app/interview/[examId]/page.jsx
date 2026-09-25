@@ -15,6 +15,7 @@ import { requestWhatsAppOtp, verifyWhatsAppOtp } from "@/lib/whatsappOtpClient";
 import { isAppleMobileDevice } from "@/lib/deviceDetect";
 import MathTextDisplay from "@/components/MathTextDisplay";
 import { auth, firebaseAuth, db, firestoreHelpers } from "../../../lib/firebase";
+import { scoreDescriptiveExam } from "@/lib/descriptiveGrammarScore";
 
 /** Last 10 digits — consistent key for OTP phone checks and Firestore queries. */
 function normalizeInterviewPhone(raw) {
@@ -1128,6 +1129,40 @@ export default function TakeInterviewExamPage() {
         });
       });
 
+      const localDescription = scoreDescriptiveExam(exam?.questions || [], answers);
+      let descriptionScore = localDescription;
+      if (localDescription.maxScore > 0) {
+        try {
+          const grammarRes = await fetch("/api/interview/grammar-check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: localDescription.questions.map((q) => ({
+                questionIndex: q.questionIndex,
+                maxScore: q.maxScore,
+                text: answers?.[q.questionIndex] != null ? String(answers[q.questionIndex]) : "",
+              })),
+            }),
+          });
+          if (grammarRes.ok) {
+            const graded = await grammarRes.json();
+            if (graded && typeof graded.score === "number") descriptionScore = graded;
+          }
+        } catch {
+          descriptionScore = localDescription;
+        }
+      }
+      const questionList = exam?.questions || [];
+      descriptionScore = {
+        ...descriptionScore,
+        questions: (descriptionScore.questions || []).map((row) => ({
+          ...row,
+          question: String(questionList[row.questionIndex]?.question || ""),
+          answer:
+            answers?.[row.questionIndex] != null ? String(answers[row.questionIndex]) : "",
+        })),
+      };
+
       const payload = {
         name: fullName.trim(),
         phone: phoneDigits,
@@ -1136,6 +1171,7 @@ export default function TakeInterviewExamPage() {
         answers,
         mcqScore,
         codingScore,
+        descriptionScore,
         lastRunSummary: Object.fromEntries(
           Object.entries(runResults || {}).map(([qIndex, runs]) => {
             const list = Array.isArray(runs) ? runs : [];
@@ -1149,21 +1185,25 @@ export default function TakeInterviewExamPage() {
       await firestoreHelpers.addDoc(subCol, payload);
       
       // Calculate total score and percentage
-      const totalScore = mcqScore.score + codingScore;
+      const descriptionPoints = Number(descriptionScore?.score) || 0;
+      const maxDescriptionScore = Number(descriptionScore?.maxScore) || 0;
+      const totalScore = mcqScore.score + codingScore + descriptionPoints;
       const maxMcqScore = mcqScore.total;
       const maxCodingScore = (exam?.questions || [])
         .filter((q) => q?.type === "coding")
         .reduce((sum, q) => sum + (Number.isFinite(Number(q.maxScore)) ? Number(q.maxScore) : 10), 0);
-      const maxTotalScore = maxMcqScore + maxCodingScore;
+      const maxTotalScore = maxMcqScore + maxCodingScore + maxDescriptionScore;
       const percentage = maxTotalScore > 0 ? Math.round((totalScore / maxTotalScore) * 100) : 0;
       
       // Store results but don't show yet
       setExamResults({
         mcqScore,
         codingScore,
+        descriptionScore,
         totalScore,
         maxMcqScore,
         maxCodingScore,
+        maxDescriptionScore,
         maxTotalScore,
         percentage,
         mcqSectionScores: mcqSectionScores,
@@ -1332,7 +1372,7 @@ export default function TakeInterviewExamPage() {
               </div>
 
               {/* Side-by-Side Score Breakdown */}
-              <div className="grid sm:grid-cols-2 gap-3 mb-4">
+              <div className={`grid gap-3 mb-4 ${examResults.maxDescriptionScore > 0 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                 {/* MCQ Section Card */}
                 <div className="bg-white rounded-lg shadow-md p-4 border-2 border-emerald-200">
                   <h3 className="text-sm sm:text-base font-bold text-gray-900 mb-3">MCQ Section</h3>
@@ -1356,6 +1396,24 @@ export default function TakeInterviewExamPage() {
                     Based on test case results
                   </p>
                 </div>
+
+                {examResults.maxDescriptionScore > 0 && (
+                  <div className="bg-white rounded-lg shadow-md p-4 border-2 border-violet-200">
+                    <h3 className="text-sm sm:text-base font-bold text-gray-900 mb-3">Descriptive Section</h3>
+                    <div className="flex items-baseline gap-1.5 mb-1.5">
+                      <span className="text-3xl sm:text-4xl font-bold text-gray-900">
+                        {Number(examResults.descriptionScore?.score || 0).toFixed(1)}
+                      </span>
+                      <span className="text-base sm:text-lg text-gray-600">/ {examResults.maxDescriptionScore}</span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-gray-600 mt-1.5">
+                      Grammar and error check
+                      {examResults.descriptionScore?.errorCount
+                        ? ` · ${examResults.descriptionScore.errorCount} issue${examResults.descriptionScore.errorCount === 1 ? "" : "s"}`
+                        : " · no issues found"}
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* MCQ Section-wise results first (always visible when present) */}
@@ -1482,6 +1540,41 @@ export default function TakeInterviewExamPage() {
                             <span className="text-xl sm:text-2xl font-bold text-blue-700">{qDetail.score.toFixed(1)}</span>
                             <span className="text-sm sm:text-base text-gray-600">/ {qDetail.maxScore}</span>
                           </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </details>
+              )}
+
+              {examResults.descriptionScore?.questions?.length > 0 && (
+                <details className="mb-4">
+                  <summary className="cursor-pointer bg-white rounded-lg shadow-md p-3 text-center text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors">
+                    Descriptive section — grammar and error check
+                  </summary>
+                  <div className="mt-3 bg-white rounded-lg shadow-md p-4">
+                    <div className="space-y-2">
+                      {examResults.descriptionScore.questions.map((qDetail) => (
+                        <div key={qDetail.questionIndex} className="bg-violet-50 border-2 border-violet-200 rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-1.5 gap-2">
+                            <span className="font-semibold text-gray-900 text-xs sm:text-sm">Question {qDetail.questionNumber}</span>
+                            <span className={`text-xs sm:text-sm font-medium ${qDetail.errorCount ? "text-violet-700" : "text-green-600"}`}>
+                              {qDetail.errorCount ? `${qDetail.errorCount} issue${qDetail.errorCount === 1 ? "" : "s"}` : "No issues"}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-1.5">
+                            <span className="text-xl sm:text-2xl font-bold text-violet-700">{Number(qDetail.score || 0).toFixed(1)}</span>
+                            <span className="text-sm sm:text-base text-gray-600">/ {qDetail.maxScore}</span>
+                          </div>
+                          {Array.isArray(qDetail.errors) && qDetail.errors.length > 0 && (
+                            <ul className="mt-2 space-y-1">
+                              {qDetail.errors.slice(0, 4).map((err, errIdx) => (
+                                <li key={errIdx} className="text-xs text-gray-700">
+                                  {err.message}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
                         </div>
                       ))}
                     </div>

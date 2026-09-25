@@ -27,6 +27,12 @@ import readXlsxFile from "read-excel-file";
 import ExcelJS from "exceljs";
 import MathQuestionField from "@/components/MathQuestionField";
 import { formatMathNotation } from "@/lib/formatMathNotation";
+import { scoreDescriptiveExam } from "@/lib/descriptiveGrammarScore";
+import {
+  buildInterviewScorecardPdf,
+  buildScorecardFileName,
+  loadVaweLogoBase64,
+} from "@/lib/interviewScorecardPdf";
 
 /** Normalize topic tags from Firestore/Excel/UI (comma-separated string or array). */
 function normalizeTopicsFromUnknown(raw) {
@@ -356,6 +362,28 @@ export default function AdminInterviewExamsPage() {
                 score: typeof mcqStored.score === "number" ? mcqStored.score : mcqStored.correct,
               }
             : computeMcqScore(ex, data);
+          const examQuestions = Array.isArray(ex?.questions) ? ex.questions : [];
+          const scoredDescription =
+            data?.descriptionScore && typeof data.descriptionScore.score === "number"
+              ? data.descriptionScore
+              : scoreDescriptiveExam(examQuestions, data?.answers || {});
+          const descriptionScore = {
+            ...scoredDescription,
+            questions: (scoredDescription.questions || []).map((row) => {
+              const written = data?.answers?.[row.questionIndex] ?? data?.answers?.[String(row.questionIndex)];
+              return {
+                ...row,
+                question:
+                  row.question || String(examQuestions[row.questionIndex]?.question || ""),
+                answer:
+                  row.answer != null && String(row.answer).trim()
+                    ? String(row.answer)
+                    : written != null
+                      ? String(written)
+                      : "",
+              };
+            }),
+          };
           aggregated.push({
             id: d.id,
             examId: ex.id,
@@ -364,14 +392,21 @@ export default function AdminInterviewExamsPage() {
             phone: data?.phone || "",
             submittedAt: data?.submittedAt,
             mcq,
+            mcqSectionScores: mcqStored?.sectionScores || null,
+            mcqTopicScores: mcqStored?.topicScores || null,
+            mcqCompanyScores: mcqStored?.companyScores || null,
             codingScore: typeof data?.codingScore === "number" ? data.codingScore : null,
+            lastRunSummary: data?.lastRunSummary || null,
+            descriptionScore,
           });
         });
       }
-      // Sort by total score (mcq + coding), then newest
+      // Sort by total score (mcq + coding + descriptive), then newest
       aggregated.sort((a, b) => {
-        const aTotal = (a.mcq?.score ?? 0) + (a.codingScore ?? 0);
-        const bTotal = (b.mcq?.score ?? 0) + (b.codingScore ?? 0);
+        const aTotal =
+          (a.mcq?.score ?? 0) + (a.codingScore ?? 0) + (a.descriptionScore?.score ?? 0);
+        const bTotal =
+          (b.mcq?.score ?? 0) + (b.codingScore ?? 0) + (b.descriptionScore?.score ?? 0);
         if (bTotal !== aTotal) return bTotal - aTotal;
         return (b.submittedAt || 0) - (a.submittedAt || 0);
       });
@@ -695,12 +730,81 @@ export default function AdminInterviewExamsPage() {
     setResultsInfo(`Filtered results: ${displayedResults.length}.`);
   };
 
+  const downloadResultScorecard = async (r) => {
+    const ex = exams.find((item) => item.id === r.examId);
+    const questions = Array.isArray(ex?.questions) ? ex.questions : [];
+    const descriptionScore = r.descriptionScore || { score: 0, maxScore: 0, errorCount: 0, questions: [] };
+    const maxDescriptionScore = Number(descriptionScore.maxScore) || 0;
+    const codingScore = Number(r.codingScore) || 0;
+    const maxCodingScore = questions
+      .filter((q) => q?.type === "coding")
+      .reduce((sum, q) => sum + (Number.isFinite(Number(q.maxScore)) ? Number(q.maxScore) : 10), 0);
+    const mcqPoints = r.mcq?.score ?? r.mcq?.correct ?? 0;
+    const maxMcqScore = Number(r.mcq?.total) || 0;
+    const descPoints = maxDescriptionScore > 0 ? Number(descriptionScore.score) || 0 : 0;
+    const totalScore = mcqPoints + codingScore + descPoints;
+    const maxTotalScore = maxMcqScore + maxCodingScore + maxDescriptionScore;
+    const percentage = maxTotalScore > 0 ? Math.round((totalScore / maxTotalScore) * 100) : 0;
+    let codingNumber = 0;
+    const codingQuestionDetails = questions.flatMap((q, index) => {
+      if (!q || q.type !== "coding") return [];
+      codingNumber += 1;
+      const summary = r.lastRunSummary?.[index] || r.lastRunSummary?.[String(index)] || {};
+      const maxScore = Number.isFinite(Number(q.maxScore)) ? Number(q.maxScore) : 10;
+      const passCount = Number(summary.passCount) || 0;
+      const totalTests = Number(summary.total) || 0;
+      const score = totalTests > 0 ? maxScore * (passCount / totalTests) : 0;
+      return [{
+        questionIndex: index,
+        questionNumber: codingNumber,
+        passCount,
+        totalTests,
+        score,
+        maxScore,
+      }];
+    });
+    const submittedAt =
+      typeof r.submittedAt === "number"
+        ? new Date(r.submittedAt)
+        : r.submittedAt?.toDate?.() || new Date();
+    const logoBase64 = await loadVaweLogoBase64();
+    const doc = buildInterviewScorecardPdf(
+      {
+        mcqScore: {
+          score: mcqPoints,
+          total: maxMcqScore,
+          correct: r.mcq?.correct ?? mcqPoints,
+        },
+        codingScore,
+        descriptionScore,
+        totalScore,
+        maxMcqScore,
+        maxCodingScore,
+        maxDescriptionScore,
+        maxTotalScore,
+        percentage,
+        mcqSectionScores: r.mcqSectionScores,
+        mcqTopicScores: r.mcqTopicScores,
+        mcqCompanyScores: r.mcqCompanyScores,
+        codingQuestionDetails,
+      },
+      {
+        examTitle: r.examTitle || ex?.title || "Interview Exam",
+        fullName: r.name || "N/A",
+        phone: r.phone || "N/A",
+        logoBase64,
+        generatedAt: submittedAt,
+      }
+    );
+    doc.save(buildScorecardFileName(r.name || "student", submittedAt));
+  };
+
   const downloadResultsExcel = async () => {
     if (displayedResults.length === 0) {
       alert("No results to download. Apply filters or wait for data to load.");
       return;
     }
-    const headers = ["Date", "Exam", "Name", "Phone", "MCQ Score", "Coding Score", "Total Score"];
+    const headers = ["Date", "Exam", "Name", "Phone", "MCQ Score", "Coding Score", "Description Score", "Grammar Issues", "Total Score"];
     const rows = displayedResults.map((r) => {
       const date =
         typeof r.submittedAt === "number"
@@ -712,9 +816,13 @@ export default function AdminInterviewExamsPage() {
           : "—";
       const codingVal = r.codingScore != null ? Number(r.codingScore) : 0;
       const mcqVal = r.mcq?.score ?? r.mcq?.correct ?? 0;
-      const total = mcqVal + codingVal;
+      const descMax = Number(r.descriptionScore?.maxScore) || 0;
+      const descVal = descMax > 0 ? Number(r.descriptionScore?.score) || 0 : 0;
+      const total = mcqVal + codingVal + descVal;
       const codingStr = r.codingScore != null ? Number(r.codingScore).toFixed(1) : "—";
-      return [date, r.examTitle || "", r.name || "", r.phone || "", mcqScore, codingStr, total];
+      const descStr = descMax > 0 ? `${descVal.toFixed(1)}/${descMax}` : "—";
+      const issueStr = descMax > 0 ? String(r.descriptionScore?.errorCount ?? 0) : "—";
+      return [date, r.examTitle || "", r.name || "", r.phone || "", mcqScore, codingStr, descStr, issueStr, total];
     });
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Results");
@@ -1722,7 +1830,7 @@ export default function AdminInterviewExamsPage() {
                           onChange={(text) => updateQuestion(q.id, { question: text })}
                           minRows={4}
                         />
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
                           <label className="text-sm text-gray-700">Max Score</label>
                           <input
                             type="number"
@@ -1731,6 +1839,9 @@ export default function AdminInterviewExamsPage() {
                             onChange={(e) => updateQuestion(q.id, { maxScore: e.target.value })}
                             className="w-24 border rounded-lg px-3 py-2"
                           />
+                          <span className="text-xs text-violet-700">
+                            Scored by grammar and error check
+                          </span>
                         </div>
                       </div>
                     ))}
@@ -2213,7 +2324,7 @@ Examples:
                   </button>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="px-2 py-1 rounded-full bg-[#00448a]/10 text-[#00448a] border border-[#00448a]/20">
-                      Sorted by total (MCQ + Coding)
+                      Sorted by total (MCQ + Coding + Description)
                     </span>
                     <span className="px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
                       Newest as tie-breaker
@@ -2318,6 +2429,7 @@ Examples:
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Phone</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">MCQ Score</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Coding Score</th>
+                      <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Description Score</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Total</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Action</th>
                     </tr>
@@ -2336,7 +2448,16 @@ Examples:
                         r.codingScore != null
                           ? Number(r.codingScore).toFixed(1)
                           : "—";
-                      const totalScore = (r.mcq?.score ?? r.mcq?.correct ?? 0) + (r.codingScore ?? 0);
+                      const descMax = Number(r.descriptionScore?.maxScore) || 0;
+                      const descScore =
+                        descMax > 0
+                          ? `${Number(r.descriptionScore?.score || 0).toFixed(1)}/${descMax}`
+                          : "—";
+                      const descIssues = descMax > 0 ? Number(r.descriptionScore?.errorCount) || 0 : 0;
+                      const totalScore =
+                        (r.mcq?.score ?? r.mcq?.correct ?? 0) +
+                        (r.codingScore ?? 0) +
+                        (descMax > 0 ? Number(r.descriptionScore?.score) || 0 : 0);
                       return (
                         <tr key={`${r.examId}-${r.id}`} className="hover:bg-gray-50 transition-colors">
                           <td className="py-3 px-4 whitespace-nowrap text-gray-700">{date}</td>
@@ -2354,18 +2475,36 @@ Examples:
                             </span>
                           </td>
                           <td className="py-3 px-4">
+                            <span
+                              className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800"
+                              title={descMax > 0 ? `${descIssues} grammar or writing issue(s)` : "No descriptive questions"}
+                            >
+                              {descScore}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
                             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800 font-semibold">
                               {totalScore.toFixed(1)}
                             </span>
                           </td>
                           <td className="py-3 px-4">
-                            <button
-                              onClick={() => deleteResult(r.examId, r.id, r.name, r.phone)}
-                              className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
-                              title="Delete result"
-                            >
-                              Delete
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => downloadResultScorecard(r)}
+                                className="px-3 py-1.5 text-xs bg-[#00448a] hover:bg-[#003a76] text-white rounded transition-colors"
+                                title="Download scorecard with descriptive answers"
+                              >
+                                Download
+                              </button>
+                              <button
+                                onClick={() => deleteResult(r.examId, r.id, r.name, r.phone)}
+                                className="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white rounded transition-colors"
+                                title="Delete result"
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
