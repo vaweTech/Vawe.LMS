@@ -84,9 +84,9 @@ export default function RootLayout({ children }) {
     <html lang="en-IN">
       <head>
         <link rel="canonical" href="https://skillwins.in" />
-        <link rel="apple-touch-icon" href="/favicon.ico" />
-        <link rel="icon" type="image/png" sizes="32x32" href="/logo1.png" />
-        <link rel="shortcut icon" href="/logo1.png" />
+        <link rel="apple-touch-icon" href="/vawe-emblem.png" />
+        <link rel="icon" type="image/png" href="/vawe-emblem.png" />
+        <link rel="shortcut icon" href="/vawe-emblem.png" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#2563eb" />
         <meta name="geo.region" content="IN-AP" />
@@ -110,7 +110,7 @@ export default function RootLayout({ children }) {
               ],
               "description": "Best software training institute in Vijayawada offering comprehensive programming courses and advanced LMS solutions",
               "url": "https://skillwins.in",
-              "logo": "https://skillwins.in/logo1.png",
+              "logo": "https://skillwins.in/vawe-emblem.png",
               "image": "https://skillwins.in/LmsImg.jpg",
               "telephone": "+91-XXXXXXXXXX",
               "email": "info@skillwins.in",

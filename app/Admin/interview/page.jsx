@@ -16,6 +16,10 @@ import {
   getLinkPaperExamIds,
   qrCodeImageUrl,
 } from "@/lib/interviewExamPapers";
+import { LINK_MODE_RANDOM, LINK_MODE_SEQUENTIAL, getLinkMode } from "@/lib/interviewLinkAssignment";
+
+const NO_LINK_ID = "__direct__";
+const NO_LINK_LABEL = "Direct (no link)";
 import CheckAuth from "../../../lib/CheckAuth";
 import { auth, db, firestoreHelpers } from "../../../lib/firebase";
 import { makeAuthenticatedRequest } from "@/lib/authUtils";
@@ -274,6 +278,9 @@ export default function AdminInterviewExamsPage() {
   const [resultPhone, setResultPhone] = useState("");
   const [resultName, setResultName] = useState("");
   const [resultExamId, setResultExamId] = useState("all");
+  /** Results view: "link" = grouped/filtered by link label, "exam" = grouped/filtered by test name. */
+  const [resultsGroupBy, setResultsGroupBy] = useState("link");
+  const [resultLinkId, setResultLinkId] = useState("all");
   const [appliedPhone, setAppliedPhone] = useState("");
   const [appliedName, setAppliedName] = useState("");
   const [resultsLoading, setResultsLoading] = useState(false);
@@ -291,6 +298,8 @@ export default function AdminInterviewExamsPage() {
   const [linksLoading, setLinksLoading] = useState(false);
   const [linkLabel, setLinkLabel] = useState("");
   const [linkExamIds, setLinkExamIds] = useState([]);
+  /** "" until the admin picks: LINK_MODE_RANDOM or LINK_MODE_SEQUENTIAL (only asked for 2+ exams). */
+  const [linkMode, setLinkMode] = useState("");
   const [creatingLink, setCreatingLink] = useState(false);
   const [linkOrigin, setLinkOrigin] = useState("");
   const [copiedLinkId, setCopiedLinkId] = useState("");
@@ -347,6 +356,36 @@ export default function AdminInterviewExamsPage() {
           ? exams
           : exams.filter((e) => e.id === resultExamId);
 
+      // Links: label by id, plus phone+exam → link from per-phone assignments (for submissions saved
+      // before the link was recorded on the submission itself).
+      const linkById = new Map();
+      const linkByExamPhone = new Map();
+      try {
+        const linksSnap = await firestoreHelpers.getDocs(
+          firestoreHelpers.collection(db, "interviewExamLinks")
+        );
+        await Promise.all(
+          linksSnap.docs.map(async (l) => {
+            const info = { id: l.id, label: String(l.data()?.label || "").trim() || "Untitled link" };
+            linkById.set(l.id, info);
+            try {
+              const aSnap = await firestoreHelpers.getDocs(
+                firestoreHelpers.collection(db, "interviewExamLinks", l.id, "assignments")
+              );
+              aSnap.docs.forEach((a) => {
+                const x = a.data() || {};
+                const phone10 = String(x.phone || a.id).replace(/\D/g, "").slice(-10);
+                if (x.examId && phone10) linkByExamPhone.set(`${x.examId}::${phone10}`, info);
+              });
+            } catch (_) {
+              /* assignments are optional */
+            }
+          })
+        );
+      } catch (_) {
+        /* results still load without link info */
+      }
+
       const aggregated = [];
       for (const ex of examsToSearch) {
         const subCol = firestoreHelpers.collection(db, "interviewExams", ex.id, "submissions");
@@ -384,10 +423,22 @@ export default function AdminInterviewExamsPage() {
               };
             }),
           };
+          const phone10 = String(data?.phone || "").replace(/\D/g, "").slice(-10);
+          const link = data?.linkToken
+            ? {
+                id: data.linkToken,
+                label:
+                  linkById.get(data.linkToken)?.label ||
+                  String(data.linkLabel || "").trim() ||
+                  "Deleted link",
+              }
+            : linkByExamPhone.get(`${ex.id}::${phone10}`) || null;
           aggregated.push({
             id: d.id,
             examId: ex.id,
             examTitle: ex.title,
+            linkId: link?.id || NO_LINK_ID,
+            linkLabel: link?.label || NO_LINK_LABEL,
             name: data?.name || "",
             phone: data?.phone || "",
             submittedAt: data?.submittedAt,
@@ -455,6 +506,7 @@ export default function AdminInterviewExamsPage() {
           id: d.id,
           label: data?.label || "",
           paperExamIds: getLinkPaperExamIds(data),
+          mode: getLinkMode(data),
           active: data?.active !== false,
           createdAt: data?.createdAt,
         };
@@ -475,9 +527,23 @@ export default function AdminInterviewExamsPage() {
     );
   };
 
+  const moveLinkExam = (index, delta) => {
+    setLinkExamIds((prev) => {
+      const next = [...prev];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
   const createExamLink = async () => {
     if (linkExamIds.length < 1) {
       alert("Select at least one exam for this link.");
+      return;
+    }
+    if (linkExamIds.length > 1 && !linkMode) {
+      alert("Choose how candidates should get these exams: one random exam, or all exams one by one.");
       return;
     }
     setCreatingLink(true);
@@ -490,6 +556,7 @@ export default function AdminInterviewExamsPage() {
         label: String(linkLabel || "").trim(),
         paperExamIds: [...linkExamIds],
         paperExamTitles,
+        mode: linkExamIds.length > 1 ? linkMode : LINK_MODE_RANDOM,
         active: true,
         createdAt: Date.now(),
         createdBy: auth.currentUser?.uid || null,
@@ -498,10 +565,18 @@ export default function AdminInterviewExamsPage() {
         firestoreHelpers.doc(db, "interviewExamLinks", linkId),
         payload
       );
+      const createdMode = payload.mode;
       setLinkLabel("");
       setLinkExamIds([]);
+      setLinkMode("");
       await fetchExamLinks();
-      alert("Exam link created. Share the URL or QR code — candidates get a random test from your selection.");
+      alert(
+        createdMode === LINK_MODE_SEQUENTIAL
+          ? "Exam link created. Share the URL or QR code — candidates take all selected exams one by one, in the order you set."
+          : linkExamIds.length > 1
+            ? "Exam link created. Share the URL or QR code — each candidate gets one random exam from your selection."
+            : "Exam link created. Share the URL or QR code."
+      );
     } catch (e) {
       console.error(e);
       alert("Failed to create exam link. Please try again.");
@@ -684,20 +759,47 @@ export default function AdminInterviewExamsPage() {
     if (activePanel === "links") fetchExamLinks();
   }, [activePanel, fetchExamLinks]);
 
-  // Reset pagination when exam selection changes
+  // Reset pagination when exam / link / view selection changes
   useEffect(() => {
     setResultsPage(1);
-  }, [resultExamId]);
+  }, [resultExamId, resultLinkId, resultsGroupBy]);
 
   const displayedResults = useMemo(() => {
     const phoneDigits = String(appliedPhone || "").replace(/\D/g, "");
     const nameQuery = String(appliedName || "").trim().toLowerCase();
-    return results.filter((r) => {
+    const filtered = results.filter((r) => {
+      if (resultsGroupBy === "link" && resultLinkId !== "all" && r.linkId !== resultLinkId) return false;
       if (phoneDigits && String(r.phone || "").replace(/\D/g, "") !== phoneDigits) return false;
       if (nameQuery && !String(r.name || "").toLowerCase().includes(nameQuery)) return false;
       return true;
     });
-  }, [results, appliedPhone, appliedName]);
+    // Keep the score order inside each group; groups sorted by name, "no link" last.
+    const groupKey = (r) =>
+      resultsGroupBy === "link"
+        ? `${r.linkId === NO_LINK_ID ? "1" : "0"}${r.linkLabel.toLowerCase()}::${r.linkId}`
+        : `${String(r.examTitle || "").toLowerCase()}::${r.examId}`;
+    return filtered
+      .map((r, i) => ({ r, i, k: groupKey(r) }))
+      .sort((a, b) => a.k.localeCompare(b.k) || a.i - b.i)
+      .map((x) => x.r);
+  }, [results, appliedPhone, appliedName, resultsGroupBy, resultLinkId]);
+
+  const resultLinkOptions = useMemo(() => {
+    const map = new Map();
+    results.forEach((r) => map.set(r.linkId, r.linkLabel));
+    return [...map.entries()]
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => Number(a.id === NO_LINK_ID) - Number(b.id === NO_LINK_ID) || a.label.localeCompare(b.label));
+  }, [results]);
+
+  const resultGroupCounts = useMemo(() => {
+    const counts = new Map();
+    displayedResults.forEach((r) => {
+      const k = resultsGroupBy === "link" ? r.linkId : r.examId;
+      counts.set(k, (counts.get(k) || 0) + 1);
+    });
+    return counts;
+  }, [displayedResults, resultsGroupBy]);
 
   // Pagination for results
   const paginatedResults = useMemo(() => {
@@ -804,7 +906,7 @@ export default function AdminInterviewExamsPage() {
       alert("No results to download. Apply filters or wait for data to load.");
       return;
     }
-    const headers = ["Date", "Exam", "Name", "Phone", "MCQ Score", "Coding Score", "Description Score", "Grammar Issues", "Total Score"];
+    const headers = ["Date", "Link Label", "Exam", "Name", "Phone", "MCQ Score", "Coding Score", "Description Score", "Grammar Issues", "Total Score"];
     const rows = displayedResults.map((r) => {
       const date =
         typeof r.submittedAt === "number"
@@ -822,13 +924,21 @@ export default function AdminInterviewExamsPage() {
       const codingStr = r.codingScore != null ? Number(r.codingScore).toFixed(1) : "—";
       const descStr = descMax > 0 ? `${descVal.toFixed(1)}/${descMax}` : "—";
       const issueStr = descMax > 0 ? String(r.descriptionScore?.errorCount ?? 0) : "—";
-      return [date, r.examTitle || "", r.name || "", r.phone || "", mcqScore, codingStr, descStr, issueStr, total];
+      return [date, r.linkLabel || "", r.examTitle || "", r.name || "", r.phone || "", mcqScore, codingStr, descStr, issueStr, total];
     });
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Results");
     ws.addRow(headers);
     rows.forEach((row) => ws.addRow(row));
-    const examLabel = resultExamId === "all" ? "all-exams" : (exams.find((e) => e.id === resultExamId)?.title || resultExamId).replace(/[^\w\-]/g, "-");
+    const examLabel = (
+      resultsGroupBy === "link"
+        ? resultLinkId === "all"
+          ? "all-links"
+          : resultLinkOptions.find((l) => l.id === resultLinkId)?.label || "link"
+        : resultExamId === "all"
+          ? "all-exams"
+          : exams.find((e) => e.id === resultExamId)?.title || resultExamId
+    ).replace(/[^\w\-]/g, "-");
     const filename = `interview-results-${examLabel}-${new Date().toISOString().slice(0, 10)}.xlsx`;
     const buffer = await wb.xlsx.writeBuffer();
     const blob = new Blob([buffer], {
@@ -2077,9 +2187,10 @@ Examples:
             <div className="bg-white rounded-2xl border border-gray-200/90 shadow-sm p-4 sm:p-6">
               <div className="flex flex-wrap items-center justify-between gap-3 mb-6 pb-4 border-b border-gray-100">
                 <div>
-                  <h2 className="text-lg font-semibold text-gray-900">Random exam link</h2>
+                  <h2 className="text-lg font-semibold text-gray-900">Create exam link</h2>
                   <p className="text-xs text-gray-500 mt-0.5 max-w-2xl">
-                    Select multiple exams below. Each candidate who opens the link or scans the QR code is assigned one exam at random from your selection.
+                    Select one or more exams below. If you select more than one, you will choose whether each candidate
+                    gets one random exam or takes all of them one by one.
                   </p>
                 </div>
               </div>
@@ -2153,10 +2264,94 @@ Examples:
                     </button>
                   </div>
 
+                  {linkExamIds.length > 1 && (
+                    <fieldset className="mt-5 rounded-xl border border-gray-200 bg-white p-4">
+                      <legend className="px-1 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                        How should candidates get these {linkExamIds.length} exams? *
+                      </legend>
+                      <div className="grid gap-3 sm:grid-cols-2 mt-1">
+                        {[
+                          {
+                            value: LINK_MODE_RANDOM,
+                            title: "Random — one exam per candidate",
+                            hint: "Each candidate is given one of the selected exams at random (spread evenly).",
+                          },
+                          {
+                            value: LINK_MODE_SEQUENTIAL,
+                            title: "One by one — all exams",
+                            hint: "Each candidate takes every selected exam, test by test, in the order below.",
+                          },
+                        ].map((opt) => (
+                          <label
+                            key={opt.value}
+                            className={`flex items-start gap-3 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors ${
+                              linkMode === opt.value
+                                ? "border-[#00448a]/40 bg-[#00448a]/5"
+                                : "border-gray-100 hover:border-gray-200"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="link-mode"
+                              value={opt.value}
+                              checked={linkMode === opt.value}
+                              onChange={() => setLinkMode(opt.value)}
+                              className="mt-1 text-[#00448a] focus:ring-[#00448a]"
+                            />
+                            <span>
+                              <span className="block text-sm font-semibold text-gray-900">{opt.title}</span>
+                              <span className="block text-xs text-gray-500 mt-0.5">{opt.hint}</span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                      {!linkMode && (
+                        <p className="mt-2 text-xs font-medium text-amber-700">Please choose one option to continue.</p>
+                      )}
+
+                      {linkMode === LINK_MODE_SEQUENTIAL && (
+                        <div className="mt-4">
+                          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Exam order</p>
+                          <ol className="space-y-2">
+                            {linkExamIds.map((id, i) => (
+                              <li
+                                key={id}
+                                className="flex items-center gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2"
+                              >
+                                <span className="w-6 text-sm font-semibold text-[#00448a]">{i + 1}.</span>
+                                <span className="flex-1 min-w-0 truncate text-sm text-gray-900">
+                                  {exams.find((e) => e.id === id)?.title || "Untitled exam"}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => moveLinkExam(i, -1)}
+                                  disabled={i === 0}
+                                  className="px-2 py-1 text-xs rounded-md border border-gray-200 bg-white disabled:opacity-40"
+                                  aria-label="Move up"
+                                >
+                                  ↑
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => moveLinkExam(i, 1)}
+                                  disabled={i === linkExamIds.length - 1}
+                                  className="px-2 py-1 text-xs rounded-md border border-gray-200 bg-white disabled:opacity-40"
+                                  aria-label="Move down"
+                                >
+                                  ↓
+                                </button>
+                              </li>
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+                    </fieldset>
+                  )}
+
                   <button
                     type="button"
                     onClick={createExamLink}
-                    disabled={creatingLink || linkExamIds.length === 0}
+                    disabled={creatingLink || linkExamIds.length === 0 || (linkExamIds.length > 1 && !linkMode)}
                     className="mt-5 w-full sm:w-auto px-6 py-3 text-sm font-semibold bg-[#00448a] hover:bg-[#003a76] text-white rounded-xl disabled:opacity-60 shadow-sm transition-colors"
                   >
                     {creatingLink ? "Generating…" : "Generate link & QR code"}
@@ -2241,9 +2436,29 @@ Examples:
                             </div>
                             <p className="text-xs text-gray-500 mb-2">Created {created}</p>
                             <p className="text-xs text-gray-600 mb-3">
-                              <span className="font-medium text-gray-700">Exams in pool:</span>{" "}
-                              {examTitles.join(", ") || "—"}
+                              <span className="font-medium text-gray-700">
+                                {link.mode === LINK_MODE_SEQUENTIAL ? "Exams (in order):" : "Exams in pool:"}
+                              </span>{" "}
+                              {(link.mode === LINK_MODE_SEQUENTIAL
+                                ? examTitles.map((t, i) => `${i + 1}. ${t}`)
+                                : examTitles
+                              ).join(", ") || "—"}
                             </p>
+                            {link.paperExamIds.length > 1 && (
+                              <p className="text-xs mb-3">
+                                <span
+                                  className={`inline-flex items-center px-2 py-0.5 rounded-full font-medium ${
+                                    link.mode === LINK_MODE_SEQUENTIAL
+                                      ? "bg-indigo-100 text-indigo-800"
+                                      : "bg-amber-100 text-amber-800"
+                                  }`}
+                                >
+                                  {link.mode === LINK_MODE_SEQUENTIAL
+                                    ? "One by one — candidates take all exams"
+                                    : "Random — one exam per candidate"}
+                                </span>
+                              </p>
+                            )}
 
                             <div className="flex flex-wrap items-center gap-2 mb-3">
                               <input
@@ -2333,20 +2548,65 @@ Examples:
                 </div>
             </div>
 
+              <div className="mb-4 flex flex-wrap items-center gap-3">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">View results by</span>
+                <div className="inline-flex rounded-xl border border-gray-200 bg-gray-50 p-1">
+                  {[
+                    { id: "link", label: "Link label" },
+                    { id: "exam", label: "Test name" },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setResultsGroupBy(opt.id);
+                        if (opt.id === "link") setResultExamId("all");
+                        else setResultLinkId("all");
+                      }}
+                      className={`px-4 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                        resultsGroupBy === opt.id
+                          ? "bg-[#00448a] text-white shadow-sm"
+                          : "text-gray-700 hover:bg-white"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="border border-gray-200 rounded-xl p-3 sm:p-4 bg-gradient-to-b from-gray-50 to-white">
                 <div className="grid sm:grid-cols-12 gap-3 items-end">
                   <div className="sm:col-span-3">
-                    <label className="block text-xs text-gray-600 mb-1">Exam</label>
-                    <select
-                      value={resultExamId}
-                      onChange={(e) => setResultExamId(e.target.value)}
-                      className="w-full border rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                    >
-                      <option value="all">All Exams</option>
-                      {exams.map((ex) => (
-                        <option key={ex.id} value={ex.id}>{ex.title}</option>
-                      ))}
-                    </select>
+                    {resultsGroupBy === "link" ? (
+                      <>
+                        <label className="block text-xs text-gray-600 mb-1">Link label</label>
+                        <select
+                          value={resultLinkId}
+                          onChange={(e) => setResultLinkId(e.target.value)}
+                          className="w-full border rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                        >
+                          <option value="all">All Links</option>
+                          {resultLinkOptions.map((l) => (
+                            <option key={l.id} value={l.id}>{l.label}</option>
+                          ))}
+                        </select>
+                      </>
+                    ) : (
+                      <>
+                        <label className="block text-xs text-gray-600 mb-1">Test name</label>
+                        <select
+                          value={resultExamId}
+                          onChange={(e) => setResultExamId(e.target.value)}
+                          className="w-full border rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                        >
+                          <option value="all">All Exams</option>
+                          {exams.map((ex) => (
+                            <option key={ex.id} value={ex.id}>{ex.title}</option>
+                          ))}
+                        </select>
+                      </>
+                    )}
                   </div>
                   <div className="sm:col-span-3">
                     <label className="block text-xs text-gray-600 mb-1">Phone</label>
@@ -2424,7 +2684,9 @@ Examples:
                   <thead className="bg-gradient-to-r from-cyan-50 to-blue-50">
                     <tr>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Date</th>
-                      <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Exam</th>
+                      <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">
+                        {resultsGroupBy === "link" ? "Exam" : "Link label"}
+                      </th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Name</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">Phone</th>
                       <th className="py-3 px-4 text-left font-semibold text-gray-700 border-b">MCQ Score</th>
@@ -2435,7 +2697,21 @@ Examples:
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {paginatedResults.map((r) => {
+                    {paginatedResults.map((r, rowIdx) => {
+                      const groupId = resultsGroupBy === "link" ? r.linkId : r.examId;
+                      const prev = paginatedResults[rowIdx - 1];
+                      const isGroupStart =
+                        !prev || (resultsGroupBy === "link" ? prev.linkId : prev.examId) !== groupId;
+                      const groupHeader = isGroupStart ? (
+                        <tr key={`group-${groupId}-${rowIdx}`} className="bg-[#00448a]/5">
+                          <td colSpan={9} className="py-2 px-4 text-sm font-semibold text-[#00448a]">
+                            {resultsGroupBy === "link" ? r.linkLabel : r.examTitle || "Untitled exam"}
+                            <span className="ml-2 text-xs font-medium text-gray-500">
+                              {resultGroupCounts.get(groupId) || 0} result(s)
+                            </span>
+                          </td>
+                        </tr>
+                      ) : null;
                       const date =
                         typeof r.submittedAt === "number"
                           ? new Date(r.submittedAt).toLocaleString()
@@ -2458,10 +2734,13 @@ Examples:
                         (r.mcq?.score ?? r.mcq?.correct ?? 0) +
                         (r.codingScore ?? 0) +
                         (descMax > 0 ? Number(r.descriptionScore?.score) || 0 : 0);
-                      return (
+                      return [
+                        groupHeader,
                         <tr key={`${r.examId}-${r.id}`} className="hover:bg-gray-50 transition-colors">
                           <td className="py-3 px-4 whitespace-nowrap text-gray-700">{date}</td>
-                          <td className="py-3 px-4 text-gray-900 font-medium">{r.examTitle}</td>
+                          <td className="py-3 px-4 text-gray-900 font-medium">
+                            {resultsGroupBy === "link" ? r.examTitle : r.linkLabel}
+                          </td>
                           <td className="py-3 px-4 text-gray-700">{r.name || "—"}</td>
                           <td className="py-3 px-4 text-gray-700">{r.phone}</td>
                           <td className="py-3 px-4">
@@ -2506,8 +2785,8 @@ Examples:
                               </button>
                             </div>
                           </td>
-                        </tr>
-                      );
+                        </tr>,
+                      ];
                     })}
                   </tbody>
                 </table>

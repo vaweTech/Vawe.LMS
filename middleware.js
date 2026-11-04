@@ -71,7 +71,18 @@ function isAllowlisted(pathname) {
   return false;
 }
 
+// Every page and API request passes through here, so cache the flag briefly per server instance.
+const STATUS_TTL_MS = 15_000;
+let cachedStatus = { disabled: false, at: 0 };
+
 async function isAppDisabled(request) {
+  if (Date.now() - cachedStatus.at < STATUS_TTL_MS) return cachedStatus.disabled;
+  const disabled = await fetchAppDisabled(request);
+  cachedStatus = { disabled, at: Date.now() };
+  return disabled;
+}
+
+async function fetchAppDisabled(request) {
   try {
     const statusUrl = new URL("/api/app-status", request.nextUrl.origin);
     const res = await fetch(statusUrl, {

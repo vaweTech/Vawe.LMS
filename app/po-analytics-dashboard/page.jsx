@@ -713,7 +713,7 @@ export default function CRTPOAnalyticsDashboardPage() {
 
       const role = snap.exists() ? snap.data().role : null;
       setHasAccess(
-        ["admin", "superadmin", "crtPoUser", "po", "crtPO"].includes(role)
+        ["admin", "superadmin", "collegeAdmin", "crtPoUser", "po", "crtPO"].includes(role)
       );
       setLoading(false);
     });

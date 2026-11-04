@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Cpu, Layers, FileCheck, ChartBar, ArrowLeft, Users, UserCog, UserCheck, Briefcase } from "lucide-react";
+import { Cpu, Layers, FileCheck, ChartBar, ArrowLeft, Users, UserCog, UserCheck, UserPlus, Briefcase, TrendingUp, CalendarCheck } from "lucide-react";
 import { useAdminAccess } from "../AdminAccessContext";
 
 export default function CRTDashboardPage() {
@@ -42,7 +42,7 @@ export default function CRTDashboardPage() {
     {
       href: "/Admin/crt/PlacementsPage",
       icon: Briefcase,
-      title: "Dashboard",
+      title: "Placements",
       description: "View and manage placements for CRT programs.",
       color: "from-sky-500 to-indigo-600",
     },
@@ -68,6 +68,13 @@ export default function CRTDashboardPage() {
       color: "from-violet-500 to-purple-600",
     },
     {
+      href: "/Admin/crt/attendance",
+      icon: CalendarCheck,
+      title: "Class Attendance",
+      description: "Daily, batch-wise and student-wise attendance marked by trainers.",
+      color: "from-lime-500 to-green-600",
+    },
+    {
       href: "/Admin/crt/student-user-management",
       icon: Users,
       title: "Student Management",
@@ -83,10 +90,17 @@ export default function CRTDashboardPage() {
     },
     {
       href: "/Admin/crt/po-management",
-      icon: Layers,
+      icon: UserPlus,
       title: "CRT PO Management",
-      description: "Manage CRT-related purchase orders and tracking.",
+      description: "Create and manage placement officer (PO) accounts.",
       color: "from-rose-500 to-pink-600",
+    },
+    {
+      href: "/Admin/crt/po-analytics-dashboard",
+      icon: TrendingUp,
+      title: "PO Analytics",
+      description: "Live placement analytics recorded by POs for CRT students.",
+      color: "from-teal-500 to-emerald-600",
     },
     {
       href: "/Admin/crt/active-incharge",

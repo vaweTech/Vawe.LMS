@@ -9,6 +9,8 @@ import { createSlug } from "../../../lib/urlUtils";
 import { db, auth } from "../../../lib/firebase";
 import { collection, getDocs, query, where, doc, getDoc } from "firebase/firestore";
 import { tenantSegments } from "@/lib/tenantPath";
+import { computeCrtStudentAttendance } from "@/lib/crtAttendance";
+import MyCrtProgressCard, { CrtProgrammeStrip, useMyCrtEnrollments } from "@/components/crt/MyCrtProgress";
 import {
   ArrowLeftIcon,
   AcademicCapIcon,
@@ -88,6 +90,7 @@ export default function CRTProgramDetailPage() {
 
   const [imageError, setImageError] = useState(false);
   const [attendanceStats, setAttendanceStats] = useState({ total: 0, present: 0, percent: 0 });
+  const [showAttendanceHistory, setShowAttendanceHistory] = useState(false);
   const [attendanceLoading, setAttendanceLoading] = useState(true);
   const [user, setUser] = useState(null);
   const [examsLoading, setExamsLoading] = useState(true);
@@ -98,6 +101,9 @@ export default function CRTProgramDetailPage() {
     const unsub = auth.onAuthStateChanged((u) => setUser(u));
     return () => unsub();
   }, []);
+
+  const { enrollments } = useMyCrtEnrollments(user);
+  const myEnrollment = program ? enrollments.find((e) => e.crtId === program.id) : null;
 
   // When program is from Firestore, fetch actual courses under this CRT and isNonTechnical from master course
   useEffect(() => {
@@ -175,54 +181,16 @@ export default function CRTProgramDetailPage() {
           if (!cancelled) setAttendanceStats({ total: 0, present: 0, percent: 0 });
           return;
         }
-        const uid = user.uid;
-        let studentDocId = uid;
-        try {
-          const directSnap = await getDoc(
-            doc(db, ...tenantSegments(null, "students"), uid)
-          );
-          if (!directSnap.exists()) {
-            const sq = query(
-              collection(db, ...tenantSegments(null, "students")),
-              where("uid", "==", uid)
-            );
-            const sSnap = await getDocs(sq);
-            if (!sSnap.empty) studentDocId = sSnap.docs[0].id;
-          }
-        } catch (_) {}
-        const attCol = collection(db, ...tenantSegments(null, "attendance"));
-        let totalSessions = 0;
-        let presentSessions = 0;
-        for (const course of coursesList) {
-          const trainerSnap = await getDocs(
-            query(attCol, where("type", "==", "trainer"), where("courseId", "==", course.id))
-          );
-          const selfSnap = await getDocs(
-            query(attCol, where("type", "==", "self"), where("courseId", "==", course.id), where("userId", "==", uid))
-          );
-          const trainerChapters = new Set();
-          const trainerPresentChapters = new Set();
-          trainerSnap.docs.forEach((d) => {
-            const data = d.data() || {};
-            const chId = data.chapterId;
-            if (!chId) return;
-            trainerChapters.add(chId);
-            const presentArr = Array.isArray(data.present) ? data.present : [];
-            if (presentArr.includes(studentDocId)) trainerPresentChapters.add(chId);
-          });
-          const selfChapters = new Set();
-          selfSnap.docs.forEach((d) => {
-            const data = d.data() || {};
-            if (data.chapterId) selfChapters.add(data.chapterId);
-          });
-          const totalChapters = new Set([...trainerChapters, ...selfChapters]);
-          const selfOnlyPresent = new Set([...selfChapters].filter((ch) => !trainerChapters.has(ch)));
-          const presentChapters = new Set([...trainerPresentChapters, ...selfOnlyPresent]);
-          totalSessions += totalChapters.size;
-          presentSessions += presentChapters.size;
-        }
-        const percent = totalSessions > 0 ? Math.round((presentSessions / totalSessions) * 100) : 0;
-        if (!cancelled) setAttendanceStats({ total: totalSessions, present: presentSessions, percent });
+        const stats = await computeCrtStudentAttendance(
+          db,
+          user,
+          resolvedCrtId,
+          coursesList.map((c) => c.id)
+        );
+        const courseNames = Object.fromEntries(
+          coursesList.map((c) => [c.id, c.title || c.name || "Course"])
+        );
+        if (!cancelled) setAttendanceStats({ ...stats, courseNames });
       } catch (e) {
         if (!cancelled) setAttendanceStats({ total: 0, present: 0, percent: 0 });
       } finally {
@@ -230,7 +198,7 @@ export default function CRTProgramDetailPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [slug, program?.title, program, user?.uid]);
+  }, [slug, program, user]);
 
   // Fetch CRT full-length tests from Firestore crt/{crtId}/tests
   useEffect(() => {
@@ -413,6 +381,8 @@ export default function CRTProgramDetailPage() {
 
         {/* Main content */}
         <main className="max-w-4xl mx-auto px-4 sm:px-6 -mt-8 relative z-10 pb-20">
+          <CrtProgrammeStrip user={user} crtId={program.id} className="mb-6" />
+
           {/* Intro card */}
           <section className="bg-white rounded-2xl shadow-lg border border-slate-200/60 overflow-hidden mb-8">
             <div className="border-l-4 border-[#00448a] bg-slate-50/50 px-5 py-3 flex items-center gap-2">
@@ -454,8 +424,50 @@ export default function CRTProgramDetailPage() {
                   <p className="text-sm text-slate-600">No attendance recorded yet for this programme</p>
                 )}
               </div>
+              {attendanceStats.history?.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAttendanceHistory((v) => !v)}
+                  className="shrink-0 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium"
+                >
+                  {showAttendanceHistory ? "Hide day-by-day" : "View day-by-day"}
+                </button>
+              )}
             </div>
+            {showAttendanceHistory && attendanceStats.history?.length > 0 && (
+              <div className="border-t border-slate-100 max-h-80 overflow-y-auto">
+                <ul className="divide-y divide-slate-100">
+                  {attendanceStats.history.map((h) => (
+                    <li key={h.id} className="flex items-center justify-between gap-3 px-5 sm:px-6 py-2.5 text-sm">
+                      <div className="min-w-0">
+                        <p className="font-medium text-slate-800">{h.date}</p>
+                        <p className="text-xs text-slate-500 truncate">
+                          {attendanceStats.courseNames?.[h.courseId] || "Course"}
+                        </p>
+                      </div>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                          h.present ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
+                        }`}
+                      >
+                        {h.present ? "Present" : "Absent"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </section>
+
+          {myEnrollment && (
+            <div className="mb-10">
+              <MyCrtProgressCard
+                user={user}
+                enrollment={{ ...myEnrollment, slug }}
+                showProgrammeLink={false}
+              />
+            </div>
+          )}
 
           {/* 400 hr breakdown – two columns */}
           <h2 className="text-slate-800 font-bold text-lg mb-4 flex items-center gap-2">

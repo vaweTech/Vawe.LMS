@@ -80,6 +80,11 @@ export default function TakeInterviewExamPage() {
   const [exam, setExam] = useState(null);
   const [examLinkLabel, setExamLinkLabel] = useState("");
   const [assignedExamTitle, setAssignedExamTitle] = useState("");
+  /** One-by-one links: { step, totalSteps } of this exam, the next exam after submitting, or all done. */
+  const [linkStep, setLinkStep] = useState(null);
+  const [nextLinkExam, setNextLinkExam] = useState(null);
+  const [linkAllDone, setLinkAllDone] = useState(false);
+  const nextLinkExamRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [answers, setAnswers] = useState({});
@@ -164,7 +169,12 @@ export default function TakeInterviewExamPage() {
         linkToken,
         phone: normalized,
       });
+      if (assignment?.allDone) {
+        setLinkAllDone(true);
+        return null;
+      }
       if (!assignment?.examId) return null;
+      setLinkStep(assignment.step ? { step: assignment.step, totalSteps: assignment.totalSteps } : null);
 
       if (assignment.linkLabel) {
         setExamLinkLabel(assignment.linkLabel);
@@ -212,6 +222,14 @@ export default function TakeInterviewExamPage() {
           );
           return;
         }
+        // One-by-one links store no fixed assignment; this sends the candidate to their next exam.
+        if (!stored?.examId) {
+          try {
+            await applyLinkAssignment(sessionPhone);
+          } catch (e) {
+            console.warn("Could not resolve link step:", e);
+          }
+        }
       }
 
       if (typeof window !== "undefined") {
@@ -239,11 +257,12 @@ export default function TakeInterviewExamPage() {
       }
     }
     resolveLinkMeta();
-  }, [searchParams, examId, router]);
+  }, [searchParams, examId, router, applyLinkAssignment]);
 
   const examDisplayTitle = examLinkLabel || exam?.title || "Interview Exam";
-  const examAssignedLine =
-    examLinkLabel && (assignedExamTitle || exam?.title)
+  const examAssignedLine = linkStep
+    ? `Exam ${linkStep.step} of ${linkStep.totalSteps}: ${assignedExamTitle || exam?.title || ""}`
+    : examLinkLabel && (assignedExamTitle || exam?.title)
       ? `Assigned set: ${assignedExamTitle || exam?.title}`
       : "";
 
@@ -1168,6 +1187,8 @@ export default function TakeInterviewExamPage() {
         phone: phoneDigits,
         userId: userId || null,
         submittedAt: Date.now(),
+        linkToken: searchParams?.get("linkToken") || null,
+        linkLabel: searchParams?.get("linkToken") ? examLinkLabel || "" : "",
         answers,
         mcqScore,
         codingScore,
@@ -1183,6 +1204,20 @@ export default function TakeInterviewExamPage() {
         lastRunAt: lastRunAtMap,
       };
       await firestoreHelpers.addDoc(subCol, payload);
+
+      const submitLinkToken = searchParams?.get("linkToken") || "";
+      if (submitLinkToken && linkStep) {
+        try {
+          const next = await resolveInterviewLinkAssignment({ linkToken: submitLinkToken, phone: phoneDigits });
+          if (next?.examId && String(next.examId) !== String(examId)) {
+            const nextInfo = { ...next, linkToken: submitLinkToken };
+            nextLinkExamRef.current = nextInfo;
+            setNextLinkExam(nextInfo);
+          }
+        } catch (e) {
+          console.warn("Could not find the next exam for this link:", e);
+        }
+      }
       
       // Calculate total score and percentage
       const descriptionPoints = Number(descriptionScore?.score) || 0;
@@ -1263,6 +1298,7 @@ export default function TakeInterviewExamPage() {
             clearInterval(countdownIntervalRef.current);
             countdownIntervalRef.current = null;
           }
+          if (nextLinkExamRef.current) return;
           setEmbedInstituteSite(true);
         }, 300000); // 5 minutes = 300000 milliseconds
       }, 10000);
@@ -1277,9 +1313,46 @@ export default function TakeInterviewExamPage() {
   if (!exam) {
     return <div className="min-h-dvh flex items-center justify-center">Exam not found.</div>;
   }
+  if (linkAllDone && !showResults && !processing) {
+    return (
+      <div className="min-h-dvh bg-gradient-to-b from-sky-50 to-cyan-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full rounded-2xl border border-gray-200 bg-white shadow-sm p-8 text-center">
+          <p className="text-lg font-semibold text-gray-900">All exams completed</p>
+          <p className="mt-2 text-sm text-gray-600">
+            You have already submitted every exam in {examLinkLabel ? `"${examLinkLabel}"` : "this link"}. Thank you!
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-dvh bg-gradient-to-b from-sky-50 to-cyan-50">
+      {showResults && nextLinkExam && !embedInstituteSite && (
+        <div className="fixed top-0 inset-x-0 z-[60] bg-[#00448a] text-white shadow-lg">
+          <div className="max-w-4xl mx-auto px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <p className="text-sm">
+              <span className="font-semibold">
+                Next: exam {nextLinkExam.step} of {nextLinkExam.totalSteps}
+              </span>
+              {nextLinkExam.examTitle ? ` — ${nextLinkExam.examTitle}` : ""}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                if (resultsTimerRef.current) clearTimeout(resultsTimerRef.current);
+                if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                window.location.assign(
+                  `/interview/${nextLinkExam.examId}?linkToken=${encodeURIComponent(nextLinkExam.linkToken)}`
+                );
+              }}
+              className="px-4 py-2 rounded-lg bg-white text-[#00448a] text-sm font-semibold hover:bg-blue-50"
+            >
+              Start next exam →
+            </button>
+          </div>
+        </div>
+      )}
       {/* Processing Screen - Shows for 10 seconds after submission */}
       {processing && (
         <div className="fixed inset-0 z-50 bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">

@@ -2,46 +2,15 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import {
-  GraduationCap,
-  ArrowLeft,
-  User,
-  Mail,
-  Phone,
-  MapPin,
-  Video,
-  FileText,
-  Presentation,
-  ClipboardList,
-  MessageSquare,
-  Radio,
-  BookOpen,
-  X,
-} from "lucide-react";
+import { GraduationCap, ArrowLeft, User, BookOpen } from "lucide-react";
 import { db } from "../lib/firebase";
 import { createSlug } from "../lib/urlUtils";
-import {
-  collection,
-  getDocs,
-  getDoc,
-  doc,
-  onSnapshot,
-  collectionGroup,
-  query,
-  where,
-} from "firebase/firestore";
-
-const RECENT_CLASS_CARDS = [
-  { id: "java", name: "JAVA", gradient: "from-[#00448a] to-[#26ebe5]" },
-  { id: "soft-skills", name: "Soft Skills", gradient: "from-[#26ebe5] to-[#0ea5e9]" },
-  { id: "aptitude", name: "Aptitude", gradient: "from-[#f56c53] to-[#fdc377]" },
-  { id: "html", name: "HTML", gradient: "from-[#00448a] to-[#f56c53]" },
-];
+import { collection, getDocs, getDoc, doc, onSnapshot } from "firebase/firestore";
+import MyCrtProgressCard, { useMyCrtEnrollments } from "./crt/MyCrtProgress";
+import MyClassPanels from "./crt/MyClassPanels";
 
 export default function CRTProgramView({ user, profile, setProfile, showBackToDashboard, studentDocId }) {
   const [selectedCrtId, setSelectedCrtId] = useState(null);
-  const [recentClassModal, setRecentClassModal] = useState(null);
-  const [upcomingClassModal, setUpcomingClassModal] = useState(null);
   const [crtPrograms, setCrtPrograms] = useState([]);
   const [crtCourses, setCrtCourses] = useState([]);
   const [coursesWithProgress, setCoursesWithProgress] = useState([]);
@@ -70,29 +39,14 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
     return () => unsub();
   }, []);
 
-  // Resolve which CRTs this student is assigned to (crt/{id}/students has studentId)
+  const { enrollments, loading: loadingEnrollments } = useMyCrtEnrollments(user);
+
   useEffect(() => {
-    if (!db || !studentDocId) {
-      setAssignedCrtIds([]);
-      return;
+    setAssignedCrtIds(enrollments.map((e) => e.crtId));
+    if (enrollments.length > 0) {
+      setSelectedCrtId((prev) => prev ?? enrollments[0].crtId);
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const q = query(
-          collectionGroup(db, "students"),
-          where("studentId", "==", studentDocId)
-        );
-        const snap = await getDocs(q);
-        if (cancelled) return;
-        const ids = snap.docs.map((d) => d.ref.parent.parent?.id).filter(Boolean);
-        setAssignedCrtIds(ids);
-      } catch (e) {
-        if (!cancelled) setAssignedCrtIds([]);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [studentDocId]);
+  }, [enrollments]);
 
   // Real-time: courses for selected CRT from crt/{crtId}/courses
   useEffect(() => {
@@ -165,6 +119,7 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
       ? crtPrograms.filter((p) => assignedCrtIds.includes(p.id))
       : crtPrograms;
   const selectedProgram = crtPrograms.find((p) => p.id === selectedCrtId);
+  const classEnrollment = enrollments.find((e) => e.crtId === selectedCrtId) || enrollments[0] || null;
 
   const displayName =
     profile?.name ||
@@ -174,15 +129,15 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
   const email = profile?.email || user?.email || "";
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#fdc377]/30 via-[#26ebe5]/20 to-[#00448a]/10 p-4 sm:p-6 lg:p-8 2xl:p-10">
+    <div className="min-h-screen bg-gradient-to-br from-[#fdc377]/30 via-[#26ebe5]/20 to-[#00448a]/10 px-3 py-4 sm:p-6 lg:p-8 2xl:p-10">
       <div className="w-full max-w-6xl xl:max-w-7xl mx-auto">
         {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 sm:mb-10 space-y-4 sm:space-y-0">
-          <h1 className="text-2xl sm:text-3xl font-bold">CRT Dashboard</h1>
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-5 sm:mb-8 lg:mb-10">
+          <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold">CRT Dashboard</h1>
           {showBackToDashboard && (
             <Link
               href="/dashboard"
-              className="inline-flex items-center text-sm bg-white/90 border border-gray-200 px-3 py-2 rounded-xl shadow-sm hover:bg-gray-50 transition"
+              className="inline-flex items-center text-xs sm:text-sm bg-white/90 border border-gray-200 px-3 py-2 rounded-xl shadow-sm hover:bg-gray-50 transition"
             >
               <ArrowLeft className="w-4 h-4 mr-1" />
               Back to Dashboard
@@ -190,15 +145,15 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
           )}
         </div>
 
-        <div className="grid gap-6 lg:gap-8 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1.6fr)] items-start">
-          {/* Left column: profile + classes */}
-          <div className="space-y-6">
+        <div className="grid gap-4 sm:gap-6 lg:gap-8 lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[360px_minmax(0,1fr)] items-start">
+          {/* Left column: profile + classes (two columns on tablet, sidebar on laptop) */}
+          <div className="grid gap-4 sm:gap-6 md:grid-cols-2 lg:grid-cols-1">
             {/* Profile (dashboard theme) */}
-            <div className="border border-black bg-white/95 p-5 sm:p-6 rounded-2xl sm:rounded-3xl shadow-xl">
-              <div className="flex items-start justify-between gap-3 mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center rounded-full border-4 border-black shadow-lg bg-white/20">
-                    <User className="w-8 h-8 sm:w-10 sm:h-10 text-black" />
+            <div className="md:col-span-2 lg:col-span-1 border border-black bg-white/95 p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-xl">
+              <div className="flex items-start justify-between gap-3 mb-3 sm:mb-4">
+                <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+                  <div className="w-14 h-14 sm:w-20 sm:h-20 lg:w-16 lg:h-16 xl:w-20 xl:h-20 shrink-0 flex items-center justify-center rounded-full border-4 border-black shadow-lg bg-white/20">
+                    <User className="w-7 h-7 sm:w-10 sm:h-10 lg:w-8 lg:h-8 xl:w-10 xl:h-10 text-black" />
                   </div>
                   <div className="min-w-0">
                     <h3 className="text-lg sm:text-xl font-bold text-black truncate">
@@ -235,105 +190,27 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
               </div>
             </div>
 
-            {/* Recent class */}
-            <div className="bg-white/90 border border-gray-200 rounded-2xl shadow-md p-4 sm:p-6">
-              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <Video className="w-5 h-5 text-[#00448a]" />
-                Recent class
-              </h2>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("record")}
-                  className="inline-flex items-center justify-center sm:justify-start gap-2 px-4 py-2.5 rounded-xl w-full sm:w-auto bg-[#00448a] text-white hover:bg-[#003a76] transition-colors"
-                >
-                  <Video className="w-4 h-4" />
-                  Record class
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("pdf")}
-                  className="inline-flex items-center justify-center sm:justify-start gap-2 px-4 py-2.5 rounded-xl w-full sm:w-auto bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <FileText className="w-4 h-4 text-[#00448a]" />
-                  Class PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("ppt")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <Presentation className="w-4 h-4 text-[#00448a]" />
-                  PPT
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("assignment")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <ClipboardList className="w-4 h-4 text-[#00448a]" />
-                  Assignment
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("feedback")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <MessageSquare className="w-4 h-4 text-[#00448a]" />
-                  Feedback
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentClassModal("trainer-pdf")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <BookOpen className="w-4 h-4 text-[#00448a]" />
-                  Trainer reference PDF
-                </button>
-              </div>
-            </div>
-
-            {/* Upcoming / Current class */}
-            <div className="bg-white/90 border border-gray-200 rounded-2xl shadow-md p-4 sm:p-6">
-              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <Radio className="w-5 h-5 text-[#00448a]" />
-                Upcoming / Current class
-              </h2>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => setUpcomingClassModal("live")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] transition-colors"
-                >
-                  <Radio className="w-4 h-4" />
-                  Live class
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUpcomingClassModal("pdf")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <FileText className="w-4 h-4 text-[#00448a]" />
-                  PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUpcomingClassModal("ppt")}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 hover:border-[#26ebe5] transition-colors"
-                >
-                  <Presentation className="w-4 h-4 text-[#00448a]" />
-                  PPT
-                </button>
-              </div>
-            </div>
+            <MyClassPanels user={user} enrollment={classEnrollment} />
           </div>
 
           {/* Right column: CRT programs + courses */}
-          <div className="space-y-6">
+          <div className="space-y-4 sm:space-y-6 min-w-0">
+            {loadingEnrollments ? (
+              <div className="rounded-2xl border border-gray-200 bg-white/90 p-5 text-sm text-gray-500">
+                Finding your programme…
+              </div>
+            ) : enrollments.length > 0 ? (
+              enrollments.map((e) => <MyCrtProgressCard key={e.crtId} user={user} enrollment={e} />)
+            ) : (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                You are not assigned to a CRT programme or batch yet. Contact your placement coordinator.
+              </div>
+            )}
+
             {/* CRT Programs heading */}
             <div>
-              <h2 className="text-xl sm:text-2xl font-bold text-gray-900 flex items-center gap-2 mb-1">
-                <GraduationCap className="w-6 h-6 text-[#00448a]" />
+              <h2 className="text-lg sm:text-xl lg:text-2xl font-bold text-gray-900 flex items-center gap-2 mb-1">
+                <GraduationCap className="w-5 h-5 sm:w-6 sm:h-6 text-[#00448a]" />
                 CRT Programs
               </h2>
               <p className="text-xs sm:text-sm text-gray-600 mb-4">
@@ -352,7 +229,7 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                   <p className="text-xs mt-1">Programs will appear here when added by admin.</p>
                 </div>
               ) : (
-                <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3">
                   {displayedPrograms.map((crt) => (
                     <button
                       key={crt.id}
@@ -366,13 +243,19 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                           : "border-gray-100 hover:border-indigo-100"
                       }`}
                     >
-                      <div className="bg-gradient-to-r from-[#00448a] to-[#f56c53] p-4 text-white">
-                        <h3 className="text-base font-semibold line-clamp-1">
+                      <div className="bg-gradient-to-r from-[#00448a] to-[#f56c53] px-4 py-3 sm:p-4 text-white">
+                        <h3 className="text-sm sm:text-base font-semibold line-clamp-2">
                           {crt.name || crt.title || crt.id}
                         </h3>
                       </div>
-                      <div className="p-4 flex items-center justify-between">
-                        <span className="text-xs text-gray-600">Program</span>
+                      <div className="px-4 py-3 sm:p-4 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs text-gray-600">
+                          {assignedCrtIds.includes(crt.id) ? (
+                            <span className="font-semibold text-emerald-700">Your programme</span>
+                          ) : (
+                            "Program"
+                          )}
+                        </span>
                         <span className="text-sm font-semibold text-[#00448a]">
                           {selectedCrtId === crt.id ? "Hide courses ↑" : "View courses ↓"}
                         </span>
@@ -386,7 +269,7 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
             {/* Selected CRT courses with progress (real-time) */}
             {selectedCrtId && (
               <div className="bg-white/95 border border-gray-200 rounded-2xl shadow-md p-4 sm:p-6">
-                <h3 className="text-lg sm:text-xl font-semibold text-gray-900 mb-4">
+                <h3 className="text-base sm:text-lg lg:text-xl font-semibold text-gray-900 mb-3 sm:mb-4 break-words">
                   {selectedProgram?.name || selectedProgram?.title || selectedCrtId} Courses
                 </h3>
                 {loadingCourses ? (
@@ -401,7 +284,7 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                     <p className="text-xs mt-1">Courses will appear when assigned by admin.</p>
                   </div>
                 ) : (
-                  <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid gap-3 sm:gap-4 sm:grid-cols-2 2xl:grid-cols-3">
                     {coursesWithProgress.map((course) => {
                       const { openedChapters = 0, totalChapters = 0, percentage = 0 } = course;
                       const title = course.title || course.name || "Untitled";
@@ -444,111 +327,6 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
         </div>
       </div>
 
-      {/* Recent class popup */}
-      {recentClassModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 sm:px-6">
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            onClick={() => setRecentClassModal(null)}
-            aria-hidden="true"
-          />
-          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-[#00448a] to-[#26ebe5] text-white">
-              <div className="flex items-center gap-2">
-                {recentClassModal === "record" && <Video className="w-5 h-5" />}
-                {recentClassModal === "pdf" && <FileText className="w-5 h-5" />}
-                {recentClassModal === "ppt" && <Presentation className="w-5 h-5" />}
-                {recentClassModal === "assignment" && <ClipboardList className="w-5 h-5" />}
-                {recentClassModal === "feedback" && <MessageSquare className="w-5 h-5" />}
-                {recentClassModal === "trainer-pdf" && <BookOpen className="w-5 h-5" />}
-                <h2 className="text-base sm:text-lg font-semibold">
-                  {recentClassModal === "record" && "Record class"}
-                  {recentClassModal === "pdf" && "Class PDF"}
-                  {recentClassModal === "ppt" && "PPT"}
-                  {recentClassModal === "assignment" && "Assignment"}
-                  {recentClassModal === "feedback" && "Feedback"}
-                  {recentClassModal === "trainer-pdf" && "Trainer reference PDF"}
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRecentClassModal(null)}
-                className="p-1.5 rounded-full hover:bg-white/15 transition-colors"
-                aria-label="Close"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="px-5 sm:px-6 pt-3 text-xs sm:text-sm text-gray-600">
-              Select a course
-            </p>
-            <div className="p-5 sm:p-6 grid grid-cols-2 gap-3 sm:gap-4">
-              {RECENT_CLASS_CARDS.map((card) => (
-                <button
-                  key={card.id}
-                  type="button"
-                  onClick={() => setRecentClassModal(null)}
-                  className={`rounded-xl shadow-sm border border-white/20 overflow-hidden text-left transition-all hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] bg-gradient-to-br ${card.gradient} p-4 text-white`}
-                >
-                  <span className="text-sm sm:text-base font-semibold line-clamp-1">
-                    {card.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Upcoming / Current class popup */}
-      {upcomingClassModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 sm:px-6">
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            onClick={() => setUpcomingClassModal(null)}
-            aria-hidden="true"
-          />
-          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-[#00448a] to-[#26ebe5] text-white">
-              <div className="flex items-center gap-2">
-                {upcomingClassModal === "live" && <Radio className="w-5 h-5" />}
-                {upcomingClassModal === "pdf" && <FileText className="w-5 h-5" />}
-                {upcomingClassModal === "ppt" && <Presentation className="w-5 h-5" />}
-                <h2 className="text-base sm:text-lg font-semibold">
-                  {upcomingClassModal === "live" && "Live class"}
-                  {upcomingClassModal === "pdf" && "PDF"}
-                  {upcomingClassModal === "ppt" && "PPT"}
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setUpcomingClassModal(null)}
-                className="p-1.5 rounded-full hover:bg-white/15 transition-colors"
-                aria-label="Close"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="px-5 sm:px-6 pt-3 text-xs sm:text-sm text-gray-600">
-              Select a course
-            </p>
-            <div className="p-5 sm:p-6 grid grid-cols-2 gap-3 sm:gap-4">
-              {RECENT_CLASS_CARDS.map((card) => (
-                <button
-                  key={card.id}
-                  type="button"
-                  onClick={() => setUpcomingClassModal(null)}
-                  className={`rounded-xl shadow-sm border border-white/20 overflow-hidden text-left transition-all hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] bg-gradient-to-br ${card.gradient} p-4 text-white`}
-                >
-                  <span className="text-sm sm:text-base font-semibold line-clamp-1">
-                    {card.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

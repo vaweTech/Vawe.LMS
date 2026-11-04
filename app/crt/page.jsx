@@ -3,9 +3,10 @@ import { useRouter } from "next/navigation";
 import { useState, useEffect, useMemo } from "react";
 import Image from "next/image";
 import CheckAuth from "../../lib/CheckAuth";
-import { db, firestoreHelpers } from "../../lib/firebase";
+import { auth, db, firestoreHelpers } from "../../lib/firebase";
 import { createSlug } from "../../lib/urlUtils";
 import { tenantSegments } from "@/lib/tenantPath";
+import { CrtProgrammeStrip, useMyCrtEnrollments } from "@/components/crt/MyCrtProgress";
 import {
   CodeBracketIcon,
   CpuChipIcon,
@@ -55,6 +56,11 @@ export default function CRTPage() {
   const [expandedId, setExpandedId] = useState(null);
   const [crts, setCrts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(null);
+  const { enrollments } = useMyCrtEnrollments(user);
+  const enrolledIds = useMemo(() => new Set(enrollments.map((e) => e.crtId)), [enrollments]);
+
+  useEffect(() => auth.onAuthStateChanged((u) => setUser(u)), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +80,10 @@ export default function CRTPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const programs = useMemo(() => crts, [crts]);
+  const programs = useMemo(
+    () => [...crts].sort((a, b) => Number(enrolledIds.has(b.id)) - Number(enrolledIds.has(a.id))),
+    [crts, enrolledIds]
+  );
 
   return (
     <CheckAuth>
@@ -105,6 +114,7 @@ export default function CRTPage() {
 
         {/* Program blocks */}
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12 sm:py-16 space-y-8 sm:space-y-10">
+          <CrtProgrammeStrip user={user} />
           {loading && (
             <div className="text-center py-12 text-slate-500">Loading programmes...</div>
           )}
@@ -211,6 +221,11 @@ export default function CRTPage() {
                         {program.duration}
                       </span>
                       <span className="text-xs font-semibold text-slate-500">{program.totalHours ?? 400} hours programme</span>
+                      {enrolledIds.has(program.id) && (
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-800">
+                          Your programme
+                        </span>
+                      )}
                     </div>
                     <p className="text-slate-600 leading-relaxed mb-6 max-w-lg text-sm sm:text-base">
                       {program.description}

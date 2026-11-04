@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
+  ArrowLeft,
   BarChart3,
   Building2,
   Download,
@@ -379,6 +381,13 @@ export default function CRTPOAnalyticsDashboardPage() {
               </div>
 
               <div className="flex items-center gap-2 sm:gap-3">
+                <Link
+                  href="/Admin/crt"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium transition-colors"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back to CRT
+                </Link>
                 <button
                   onClick={() => setReloadKey((k) => k + 1)}
                   disabled={dataLoading}

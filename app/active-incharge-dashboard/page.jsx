@@ -630,6 +630,7 @@ import {
   reauthenticateWithCredential,
 } from "firebase/auth";
 import { auth, db, firestoreHelpers, isFirebaseConfigured } from "../../lib/firebase";
+import CrtBatchAttendanceReport from "@/components/crt/CrtBatchAttendanceReport";
 import {
   ArrowLeft,
   RefreshCw,
@@ -1081,6 +1082,22 @@ export default function ActiveInchargeDashboardPage() {
           ))}
         </div>
       </div>
+
+      {/* Class attendance (marked by CRT trainers) */}
+      {selectedClass?.crtId && (selectedClass.batchId || selectedClass.classId) && (
+        <div className="bg-white rounded-2xl border p-5 mb-6">
+          <h2 className="text-xl font-semibold mb-1">Class Attendance — {selectedClass.className}</h2>
+          <p className="text-sm text-slate-500 mb-4">
+            Attendance marked by trainers. Follow up with absentees or send them an alert.
+          </p>
+          <CrtBatchAttendanceReport
+            key={`${selectedClass.crtId}__${selectedClass.batchId || selectedClass.classId}`}
+            programId={selectedClass.crtId}
+            batchId={selectedClass.batchId || selectedClass.classId}
+            batchName={selectedClass.className}
+          />
+        </div>
+      )}
 
       {/* Create Activity */}
       {selectedClass && (

@@ -21,6 +21,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { resolveCrtAndCourse } from "../../lib/crtCourseResolve";
+import { SESSION_NOT_HELD } from "../../lib/crtAttendance";
 import {
   AcademicCapIcon,
   ArrowLeftIcon,
@@ -215,9 +216,21 @@ function programAggregateProgress(classes) {
   return { pct, completed, total };
 }
 
+/** Local calendar date (YYYY-MM-DD); toISOString() would give the UTC date. */
 function getTodayStr() {
   const d = new Date();
-  return d.toISOString().slice(0, 10);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** How far back a trainer may mark or correct attendance. */
+const ATTENDANCE_BACKDATE_DAYS = 30;
+
+function getMinAttendanceDateStr() {
+  const d = new Date();
+  d.setDate(d.getDate() - ATTENDANCE_BACKDATE_DAYS);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** Stable id for top-level `attendance` docs (trainer, per batch/course/chapter/day) */
@@ -276,6 +289,60 @@ async function mirrorTrainerAttendanceToCrtStudentProfiles(db, cls, ch, dateStr,
 
 const TRAINER_ROLES = ["crtTrainer", "trainer", "admin", "superadmin"];
 
+function DaySessionStatus({ meta, onNotHeld, disabled }) {
+  const notHeld = meta?.status === SESSION_NOT_HELD;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      {notHeld ? (
+        <span className="font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1">
+          Marked as class not held — saving attendance will change this
+        </span>
+      ) : meta ? (
+        <span className="text-slate-500">
+          Marked{meta.markedByName ? ` by ${meta.markedByName}` : ""}
+        </span>
+      ) : (
+        <span className="text-slate-400">Not marked yet</span>
+      )}
+      {!notHeld && (
+        <button
+          type="button"
+          onClick={onNotHeld}
+          disabled={disabled}
+          className="px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 font-medium hover:bg-amber-50 disabled:opacity-60"
+        >
+          Class not held
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AttendanceDatePicker({ value, onChange }) {
+  const today = getTodayStr();
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <label className="text-sm font-medium text-slate-700" htmlFor="attendance-date">
+        Attendance date
+      </label>
+      <input
+        id="attendance-date"
+        type="date"
+        value={value}
+        min={getMinAttendanceDateStr()}
+        max={today}
+        onChange={(e) => e.target.value && onChange(e.target.value)}
+        className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+      />
+      {value !== today && (
+        <span className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-1">
+          Marking a past date
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function CRTTrainerPage() {
   const [filter, setFilter] = useState("all");
   const [activeModal, setActiveModal] = useState(null); // 'attendance' | 'unlock' | 'notes'
@@ -297,6 +364,10 @@ export default function CRTTrainerPage() {
   const [loadingRefNotesCourseId, setLoadingRefNotesCourseId] = useState(null);
   /** `courseId::chapterId::YYYY-MM-DD` → { [studentRowId]: true | false } */
   const [attendanceByDay, setAttendanceByDay] = useState({});
+  /** Date being marked in the attendance modals (defaults to today, can be back-dated). */
+  const [attendanceDate, setAttendanceDate] = useState(getTodayStr);
+  /** dayKey → { status, markedBy, markedByName } of the saved session, or null when not marked yet. */
+  const [daySessionMeta, setDaySessionMeta] = useState({});
   /** Firestore-backed unlock list for the open "Unlock class" modal (chapter doc ids). */
   const [unlockSnapshotIds, setUnlockSnapshotIds] = useState([]);
   const [unlockMeta, setUnlockMeta] = useState(null); // { crtId, courseId, chapters }
@@ -503,6 +574,7 @@ export default function CRTTrainerPage() {
       setReferenceNotesByCourseId({});
       setDayLinkInputDraft({});
     }
+    if (modal === "attendance" || modal === "courseTools") setAttendanceDate(getTodayStr());
     if (modal === "attendance") {
       setAttendanceExpandedCourseIds(new Set());
       setChaptersByCourseForAttendance({});
@@ -542,8 +614,8 @@ export default function CRTTrainerPage() {
   }, [studentsByBatch]);
 
   const attendanceDayKey = useCallback(
-    (cls, ch, dateStr = getTodayStr()) => `${cls.courseId}::${ch.id}::${dateStr}`,
-    []
+    (cls, ch, dateStr = attendanceDate) => `${cls.courseId}::${ch.id}::${dateStr}`,
+    [attendanceDate]
   );
 
   const setStudentDayAttendance = (dayKey, studentRowId, present) => {
@@ -555,7 +627,7 @@ export default function CRTTrainerPage() {
 
   const loadTrainerAttendanceForChapters = useCallback(async (cls, chapters, students) => {
     if (!db || !students.length) return;
-    const dateStr = getTodayStr();
+    const dateStr = attendanceDate;
     await Promise.all(
       chapters.map(async (ch) => {
         const dayKey = attendanceDayKey(cls, ch, dateStr);
@@ -572,7 +644,8 @@ export default function CRTTrainerPage() {
             )
           );
           const snap = await getDoc(ref);
-          const presentArr = snap.exists() ? snap.data()?.present : [];
+          const data = snap.exists() ? snap.data() || {} : null;
+          const presentArr = data?.present;
           const presentSet = new Set(Array.isArray(presentArr) ? presentArr : []);
           const row = {};
           for (const s of students) {
@@ -580,12 +653,22 @@ export default function CRTTrainerPage() {
             row[s.id] = presentSet.has(pid);
           }
           setAttendanceByDay((prev) => ({ ...prev, [dayKey]: row }));
+          setDaySessionMeta((prev) => ({
+            ...prev,
+            [dayKey]: data
+              ? {
+                  status: data.status === SESSION_NOT_HELD ? SESSION_NOT_HELD : "held",
+                  markedBy: data.markedBy || null,
+                  markedByName: data.markedByName || "",
+                }
+              : null,
+          }));
         } catch (e) {
           console.warn("attendance load", dayKey, e);
         }
       })
     );
-  }, [attendanceDayKey]);
+  }, [attendanceDayKey, attendanceDate]);
 
   const toggleAttendanceCourseExpand = async (cls) => {
     const id = cls.courseId;
@@ -618,23 +701,53 @@ export default function CRTTrainerPage() {
     }
   };
 
-  const handleSaveDayAttendance = async (cls, ch) => {
+  const handleSaveDayAttendance = async (cls, ch, { notHeld = false } = {}) => {
     if (!db || !cls?.batchId) return;
-    const dateStr = getTodayStr();
+    const dateStr = attendanceDate;
+    if (dateStr > getTodayStr() || dateStr < getMinAttendanceDateStr()) {
+      alert(`Attendance can only be marked for today or the last ${ATTENDANCE_BACKDATE_DAYS} days.`);
+      return;
+    }
     const dayKey = attendanceDayKey(cls, ch, dateStr);
     const students = getBatchStudents(cls);
-    const presentList = students
-      .filter((s) => attendanceByDay[dayKey]?.[s.id] === true)
-      .map((s) => s.studentId || s.id);
+    const presentList = notHeld
+      ? []
+      : students
+          .filter((s) => attendanceByDay[dayKey]?.[s.id] === true)
+          .map((s) => s.studentId || s.id);
+    if (!notHeld && presentList.length === 0) {
+      const ok = window.confirm(
+        "Nobody is marked present for this day.\n\n" +
+          "If the class did not take place, press Cancel and use \"Class not held\" instead.\n" +
+          "Press OK to save every student as absent."
+      );
+      if (!ok) return;
+    }
+    if (notHeld && !window.confirm(`Mark this day (${dateStr}) as "class not held"? It will not count towards anyone's attendance.`)) {
+      return;
+    }
+    const me = auth?.currentUser;
+    const ref = doc(
+      db,
+      "attendance",
+      trainerAttendanceDocId(cls.programId, cls.batchId, cls.courseId, ch.id, dateStr)
+    );
     setDayAttendanceSavingKey(dayKey);
     setAttendanceDaySavedKey(null);
     try {
+      const existing = await getDoc(ref);
+      const prev = existing.exists() ? existing.data() || {} : null;
+      if (prev?.markedBy && me?.uid && prev.markedBy !== me.uid) {
+        const who = prev.markedByName || "another trainer";
+        const ok = window.confirm(
+          `This day was already marked by ${who}. Saving will replace their attendance.\n\nContinue?`
+        );
+        if (!ok) return;
+      }
+      const markedByName = trainerDisplayName || me?.email || "";
+      const status = notHeld ? SESSION_NOT_HELD : "held";
       await setDoc(
-        doc(
-          db,
-          "attendance",
-          trainerAttendanceDocId(cls.programId, cls.batchId, cls.courseId, ch.id, dateStr)
-        ),
+        ref,
         {
           type: "trainer",
           courseId: cls.courseId,
@@ -642,23 +755,53 @@ export default function CRTTrainerPage() {
           crtProgramId: cls.programId,
           batchId: cls.batchId,
           date: dateStr,
+          status,
           present: presentList,
+          roster: students.map((s) => s.studentId || s.id),
+          rosterNames: Object.fromEntries(
+            students.map((s) => [s.studentId || s.id, s.rollNo ? `${s.name} (${s.rollNo})` : s.name])
+          ),
+          rosterSize: students.length,
+          markedBy: me?.uid || null,
+          markedByName,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
       try {
-        await mirrorTrainerAttendanceToCrtStudentProfiles(
-          db,
-          cls,
-          ch,
-          dateStr,
-          students,
-          attendanceByDay,
-          dayKey
-        );
-      } catch (mirrorErr) {
-        console.warn("[crtTrainar] CRT student profile attendance mirror failed:", mirrorErr);
+        await addDoc(collection(ref, "history"), {
+          status,
+          present: presentList,
+          previousPresent: Array.isArray(prev?.present) ? prev.present : null,
+          previousStatus: prev ? prev.status || "held" : null,
+          markedBy: me?.uid || null,
+          markedByName,
+          at: serverTimestamp(),
+        });
+      } catch (historyErr) {
+        console.warn("[crtTrainar] attendance history write failed:", historyErr);
+      }
+      setDaySessionMeta((p) => ({ ...p, [dayKey]: { status, markedBy: me?.uid || null, markedByName } }));
+      if (notHeld) {
+        setAttendanceByDay((p) => ({
+          ...p,
+          [dayKey]: Object.fromEntries(students.map((s) => [s.id, false])),
+        }));
+      }
+      if (!notHeld) {
+        try {
+          await mirrorTrainerAttendanceToCrtStudentProfiles(
+            db,
+            cls,
+            ch,
+            dateStr,
+            students,
+            attendanceByDay,
+            dayKey
+          );
+        } catch (mirrorErr) {
+          console.warn("[crtTrainar] CRT student profile attendance mirror failed:", mirrorErr);
+        }
       }
       setAttendanceDaySavedKey(dayKey);
       setTimeout(() => setAttendanceDaySavedKey(null), 2500);
@@ -1774,9 +1917,9 @@ export default function CRTTrainerPage() {
                       <div className="space-y-6">
                         <p className="text-sm text-slate-600">
                           Expand each <strong>course</strong>, then mark <strong>per day</strong> for{" "}
-                          <strong>all students in this batch</strong>. Attendance date:{" "}
-                          <strong>{getTodayStr()}</strong> (saved in Firestore under that date).
+                          <strong>all students in this batch</strong>.
                         </p>
+                        <AttendanceDatePicker value={attendanceDate} onChange={setAttendanceDate} />
                         {!isFirebaseConfigured && (
                           <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                             Firebase is not configured. Add env keys to load and save attendance.
@@ -1796,7 +1939,7 @@ export default function CRTTrainerPage() {
                             const expanded = attendanceExpandedCourseIds.has(cls.courseId);
                             const chapters = chaptersByCourseForAttendance[cls.courseId] || [];
                             const batchStudents = getBatchStudents(cls);
-                            const dateStr = getTodayStr();
+                            const dateStr = attendanceDate;
                             return (
                               <div
                                 key={cls.courseId}
@@ -1848,6 +1991,11 @@ export default function CRTTrainerPage() {
                                                   {saving ? "Saving…" : "Save this day"}
                                                 </button>
                                               </div>
+                                              <DaySessionStatus
+                                                meta={daySessionMeta[dayKey]}
+                                                disabled={saving || !isFirebaseConfigured || batchStudents.length === 0}
+                                                onNotHeld={() => handleSaveDayAttendance(cls, ch, { notHeld: true })}
+                                              />
                                               {justSaved && (
                                                 <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium">
                                                   <CheckCircleIcon className="w-4 h-4 shrink-0" />
@@ -1933,8 +2081,9 @@ export default function CRTTrainerPage() {
                       <div className="space-y-5">
                         <p className="text-sm text-slate-600">
                           Mark <strong>day-wise attendance</strong> and add a <strong>day-wise reference link</strong>{" "}
-                          for this course. Date: <strong>{getTodayStr()}</strong>.
+                          for this course.
                         </p>
+                        <AttendanceDatePicker value={attendanceDate} onChange={setAttendanceDate} />
 
                         {!isFirebaseConfigured && (
                           <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -1958,7 +2107,7 @@ export default function CRTTrainerPage() {
                             if (!activeChapter) return null;
                             const dayNum =
                               typeof activeChapter.order === "number" ? activeChapter.order : selectedIdx + 1;
-                            const dateStr = getTodayStr();
+                            const dateStr = attendanceDate;
                             const dayKey = attendanceDayKey(selectedClass, activeChapter, dateStr);
                             const savingAttendance = dayAttendanceSavingKey === dayKey;
                             const justSavedAttendance = attendanceDaySavedKey === dayKey;
@@ -2061,6 +2210,15 @@ export default function CRTTrainerPage() {
                                         >
                                           {savingAttendance ? "Saving…" : "Save attendance"}
                                         </button>
+                                      </div>
+                                      <div className="mb-3">
+                                        <DaySessionStatus
+                                          meta={daySessionMeta[dayKey]}
+                                          disabled={savingAttendance || !isFirebaseConfigured || batchStudents.length === 0}
+                                          onNotHeld={() =>
+                                            handleSaveDayAttendance(selectedClass, activeChapter, { notHeld: true })
+                                          }
+                                        />
                                       </div>
                                       {justSavedAttendance && (
                                         <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium mb-2">

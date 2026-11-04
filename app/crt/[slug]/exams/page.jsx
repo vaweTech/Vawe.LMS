@@ -8,6 +8,7 @@ import { getProgramBySlug } from "../../../../lib/crtProgramsData";
 import { createSlug } from "../../../../lib/urlUtils";
 import { db, auth, firestoreHelpers } from "../../../../lib/firebase";
 import { collection, getDocs, query, where } from "firebase/firestore";
+import { CrtProgrammeStrip } from "@/components/crt/MyCrtProgress";
 import {
   ArrowLeftIcon,
   AcademicCapIcon,
@@ -168,6 +169,8 @@ export default function CRTExamsPage() {
             <ArrowLeftIcon className="w-4 h-4" />
             Back to {program.title}
           </Link>
+
+          <CrtProgrammeStrip user={user} crtId={firestoreProgram?.id || null} className="mb-6" />
 
           <div className="rounded-2xl border border-violet-200/80 bg-white shadow-lg overflow-hidden">
             <div className="px-6 py-4 bg-gradient-to-r from-violet-700 to-violet-600 flex items-center gap-3">

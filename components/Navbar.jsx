@@ -476,11 +476,12 @@ export default function Navbar({
           {/* Logo + Title */}
           <div className="flex items-center space-x-2">
             <Image 
-              src="/logo1.png" 
+              src="/vawe-emblem.png" 
               alt="VAWE LMS Logo" 
-              width={32} 
-              height={32} 
-              className="h-8 w-8 sm:h-10 sm:w-10 rounded-full" 
+              width={723} 
+              height={684} 
+              priority
+              className="h-9 w-auto sm:h-11 object-contain" 
             />
            <h1 className="text-lg sm:text-xl font-bold tracking-wide " style={{ fontFamily: '"Times New Roman", Times, serif' }}>
               VAWE INSTITUTES
@@ -577,11 +578,11 @@ export default function Navbar({
               <div className="flex items-center justify-between p-4 border-b">
                 <div className="flex items-center space-x-2">
                   <Image 
-                    src="/logo1.png" 
+                    src="/vawe-emblem.png" 
                     alt="VAWE LMS Logo" 
-                    width={32} 
-                    height={32} 
-                    className="h-8 w-8 rounded-full" 
+                    width={723} 
+                    height={684} 
+                    className="h-9 w-auto object-contain" 
                   />
                   <h2 className="text-lg font-bold text-gray-900">Menu</h2>
                 </div>

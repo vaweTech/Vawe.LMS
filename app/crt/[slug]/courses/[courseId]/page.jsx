@@ -4,10 +4,16 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import CheckAuth from "../../../../../lib/CheckAuth";
+import { CrtProgrammeStrip } from "@/components/crt/MyCrtProgress";
 import { createSlug, createCourseUrl } from "../../../../../lib/urlUtils";
 import { db, auth, firestoreHelpers } from "../../../../../lib/firebase";
 import { isCrtStudentRole } from "../../../../../lib/studentRole";
 import { mcqDb } from "../../../../../lib/firebaseMCQs";
+import {
+  computeCrtStudentAttendance,
+  findBatchIdsForStudentInCrt,
+  resolveCrtStudentBatchMatchKeys,
+} from "../../../../../lib/crtAttendance";
 import {
   collection,
   doc,
@@ -56,107 +62,6 @@ function programFromCrtDoc(id, data) {
     commonCourses: Array.isArray(data.commonCourses) ? data.commonCourses : [],
     technicalCourses: Array.isArray(data.technicalCourses) ? data.technicalCourses : [],
   };
-}
-
-/**
- * Admin assigns batch members with `studentId` = document id from `students` (CRT list), not always Firebase Auth uid.
- * Collect every id/email we can tie to this login so unlock listeners attach to the right batch(es).
- */
-function addRegd(set, v) {
-  const s = String(v ?? "").trim();
-  if (s) set.add(s);
-}
-
-async function resolveCrtStudentBatchMatchKeys(db, authUser) {
-  const uid = authUser?.uid;
-  const keys = new Set();
-  const emails = new Set();
-  const regdNos = new Set();
-  if (uid) keys.add(uid);
-  const authEmail = (authUser?.email || "").trim().toLowerCase();
-  if (authEmail) emails.add(authEmail);
-
-  const absorbStudentSnap = (snap) => {
-    if (!snap || !snap.exists()) return;
-    const data = snap.data() || {};
-    keys.add(snap.id);
-    if (data.email) emails.add(String(data.email).trim().toLowerCase());
-    addRegd(regdNos, data.regdNo);
-  };
-
-  try {
-    absorbStudentSnap(await getDoc(doc(db, "students", uid)));
-  } catch (_) {
-    /* ignore */
-  }
-  try {
-    const q = query(collection(db, "students"), where("uid", "==", uid));
-    const snap = await getDocs(q);
-    snap.docs.forEach((d) => {
-      keys.add(d.id);
-      const data = d.data() || {};
-      if (data.email) emails.add(String(data.email).trim().toLowerCase());
-      addRegd(regdNos, data.regdNo);
-    });
-  } catch (_) {
-    /* ignore */
-  }
-  try {
-    const subQ = query(
-      collection(db, "users", "crtStudent", "students"),
-      where("uid", "==", uid)
-    );
-    const subSnap = await getDocs(subQ);
-    subSnap.docs.forEach((d) => {
-      keys.add(d.id);
-      const data = d.data() || {};
-      if (data.email) emails.add(String(data.email).trim().toLowerCase());
-      addRegd(regdNos, data.regdNo);
-    });
-  } catch (_) {
-    /* ignore */
-  }
-  try {
-    const alt = await getDoc(doc(db, "users", "crtStudent", "students", uid));
-    if (alt.exists()) {
-      keys.add(alt.id);
-      const data = alt.data() || {};
-      if (data.email) emails.add(String(data.email).trim().toLowerCase());
-      addRegd(regdNos, data.regdNo);
-    }
-  } catch (_) {
-    /* ignore */
-  }
-
-  return { keys, emails, regdNos };
-}
-
-/** Batches where this student appears under crt/.../batches/{id}/students */
-async function findBatchIdsForStudentInCrt(db, crtId, identity) {
-  const keys = identity?.keys instanceof Set ? identity.keys : new Set();
-  const emails = identity?.emails instanceof Set ? identity.emails : new Set();
-  const regdNos = identity?.regdNos instanceof Set ? identity.regdNos : new Set();
-  const batchesSnap = await getDocs(collection(db, "crt", crtId, "batches"));
-  const ids = [];
-  for (const b of batchesSnap.docs) {
-    const stSnap = await getDocs(
-      collection(db, "crt", crtId, "batches", b.id, "students")
-    );
-    const member = stSnap.docs.some((d) => {
-      const x = d.data() || {};
-      const sid = String(x.studentId ?? x.uid ?? d.id ?? "").trim();
-      if (sid && keys.has(sid)) return true;
-      const uidField = String(x.uid ?? "").trim();
-      if (uidField && keys.has(uidField)) return true;
-      const em = String(x.email ?? "").trim().toLowerCase();
-      if (em && emails.has(em)) return true;
-      const regd = String(x.regdNo ?? "").trim();
-      if (regd && regdNos.has(regd)) return true;
-      return false;
-    });
-    if (member) ids.push(b.id);
-  }
-  return ids;
 }
 
 /** Batches where this user is the assigned trainer */
@@ -467,58 +372,16 @@ export default function CRTCoursePage() {
 
   // Fetch attendance for this course (when course + user available)
   useEffect(() => {
-    if (!course?.id || !user?.uid) {
+    if (!course?.id || !user?.uid || !resolvedCrtId) {
       setAttendanceStats({ total: 0, present: 0, percent: 0 });
       return;
     }
-    const courseId = course.id;
     let cancelled = false;
-    (async () => {
-      try {
-        const attCol = collection(db, "attendance");
-        const trainerSnap = await getDocs(
-          query(attCol, where("type", "==", "trainer"), where("courseId", "==", courseId))
-        );
-        const selfSnap = await getDocs(
-          query(attCol, where("type", "==", "self"), where("courseId", "==", courseId), where("userId", "==", user.uid))
-        );
-        const trainerChapters = new Set();
-        const trainerPresentChapters = new Set();
-        let studentDocId = user.uid;
-        try {
-          const directSnap = await getDoc(doc(db, "students", user.uid));
-          if (!directSnap.exists()) {
-            const sq = query(collection(db, "students"), where("uid", "==", user.uid));
-            const sSnap = await getDocs(sq);
-            if (!sSnap.empty) studentDocId = sSnap.docs[0].id;
-          }
-        } catch (_) {}
-        trainerSnap.docs.forEach((d) => {
-          const data = d.data() || {};
-          const chId = data.chapterId;
-          if (!chId) return;
-          trainerChapters.add(chId);
-          const presentArr = Array.isArray(data.present) ? data.present : [];
-          if (presentArr.includes(studentDocId)) trainerPresentChapters.add(chId);
-        });
-        const selfChapters = new Set();
-        selfSnap.docs.forEach((d) => {
-          const data = d.data() || {};
-          if (data.chapterId) selfChapters.add(data.chapterId);
-        });
-        const totalChapters = new Set([...trainerChapters, ...selfChapters]);
-        const selfOnlyPresent = new Set([...selfChapters].filter((ch) => !trainerChapters.has(ch)));
-        const presentChapters = new Set([...trainerPresentChapters, ...selfOnlyPresent]);
-        const total = totalChapters.size;
-        const present = presentChapters.size;
-        const percent = total > 0 ? Math.round((present / total) * 100) : 0;
-        if (!cancelled) setAttendanceStats({ total, present, percent });
-      } catch (e) {
-        if (!cancelled) setAttendanceStats({ total: 0, present: 0, percent: 0 });
-      }
-    })();
+    computeCrtStudentAttendance(db, user, resolvedCrtId, [course.id])
+      .then((stats) => !cancelled && setAttendanceStats(stats))
+      .catch(() => !cancelled && setAttendanceStats({ total: 0, present: 0, percent: 0 }));
     return () => { cancelled = true; };
-  }, [course?.id, user?.uid]);
+  }, [course?.id, user, resolvedCrtId]);
 
   useEffect(() => {
     async function resolveAndFetch() {
@@ -666,6 +529,52 @@ export default function CRTCoursePage() {
     trainerPreviewEnabled,
   ]);
 
+  const deepLinkDoneRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkDoneRef.current || loading || !roleCheckDone || !hasCourseAccess || chapters.length === 0) return;
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const dayId = params.get("day");
+    if (!dayId) return;
+    const idx = chapters.findIndex((c) => c.id === dayId);
+    if (idx < 0) return;
+    const ch = chapters[idx];
+    const isTrainer = viewerRole === "crtTrainer" || viewerRole === "trainer";
+    const fullAccess =
+      viewerRole === "superadmin" ||
+      viewerRole === "admin" ||
+      (isTrainer && trainerPreviewEnabled) ||
+      (!isTrainer && !isCrtStudentViewer);
+    if (!fullAccess && !unlockedChapterIds.includes(ch.id)) return;
+    deepLinkDoneRef.current = true;
+    const dayNumber = typeof ch.order === "number" ? ch.order : idx + 1;
+    setExpandedDay(ch.id);
+    setInitialExpandDone(true);
+    const action = params.get("action");
+    if (action === "record" && ch.recordedClassLink) {
+      const embed = getEmbedUrl(ch.recordedClassLink);
+      if (embed) {
+        setActiveVideoUrl(embed);
+        setActiveVideoTitle(`${ch.title || "Class"} - Recorded`);
+        setActiveChapterId(ch.id);
+      }
+    } else if (action === "feedback") {
+      setFeedbackChapter({ id: ch.id, title: ch.title || `Day ${dayNumber}`, dayNumber });
+      setFeedbackForm({ practicalOriented: 0, adminSupport: 0, overallTraining: 0, classLinkOnTime: 0, comments: "" });
+      setFeedbackSubmitted(false);
+      setShowFeedbackModal(true);
+    }
+  }, [
+    loading,
+    roleCheckDone,
+    hasCourseAccess,
+    chapters,
+    viewerRole,
+    trainerPreviewEnabled,
+    isCrtStudentViewer,
+    unlockedChapterIds,
+  ]);
+
   const isChapterUnlockedForViewer = (ch) => {
     if (viewerRole === "superadmin") return true;
     if (viewerRole === "admin") return true;
@@ -804,6 +713,8 @@ export default function CRTCoursePage() {
             <ArrowLeftIcon className="w-4 h-4" />
             Back to {program.title}
           </Link>
+
+          <CrtProgrammeStrip user={user} crtId={resolvedCrtId} className="mb-6" />
 
           <div className="flex flex-col lg:flex-row lg:items-start gap-6 lg:gap-8">
             {/* Main content: course card with days */}

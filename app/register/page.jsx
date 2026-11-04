@@ -10,7 +10,7 @@ function RegisterHeader() {
   return (
     <header className="border-b border-gray-200 bg-[#00448a] shadow-sm">
       <div className="mx-auto flex max-w-2xl mt-[-75px] items-center gap-3 px-4 py-3">
-        <Image src="/logo1.png" alt="Vawe Institutes" width={40} height={40} className="h-10 w-10 object-contain" />
+        <Image src="/vawe-emblem.png" alt="Vawe Institutes" width={723} height={684} className="h-10 w-auto object-contain" />
         <span className="text-lg font-semibold text-white">VAWE INSTITUTES</span>
       </div>
     </header>

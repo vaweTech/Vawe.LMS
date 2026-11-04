@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import CheckAuth from "../../../../../../../lib/CheckAuth";
+import { CrtProgrammeStrip } from "@/components/crt/MyCrtProgress";
 import { createSlug } from "../../../../../../../lib/urlUtils";
 import { db, auth, firestoreHelpers } from "../../../../../../../lib/firebase";
 import { mcqDb } from "../../../../../../../lib/firebaseMCQs";
@@ -585,6 +586,8 @@ export default function CRTDayAssignmentPage() {
             <ArrowLeftIcon className="w-5 h-5" />
             Back to course
           </button>
+
+          <CrtProgrammeStrip user={user} className="mb-6" />
 
           {loading ? (
             <div className="rounded-2xl bg-white shadow border border-slate-200 p-8 text-slate-600">

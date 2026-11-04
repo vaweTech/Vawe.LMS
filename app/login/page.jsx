@@ -5,8 +5,9 @@ import LoginCardShell, { LoginCardLoading } from "../../components/LoginCardShel
 import { Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "../../lib/firebase";
+import { auth, db, firestoreHelpers } from "../../lib/firebase";
 import { registerSingleSessionWithConfirm } from "../../lib/singleSession";
+import { canonicalAdminRole } from "../../lib/collegeAdminAccess";
 
 function LoginPageInner() {
   const router = useRouter();
@@ -25,7 +26,9 @@ function LoginPageInner() {
     try {
       const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
       await registerSingleSessionWithConfirm(cred?.user?.uid);
-      router.push("/Admin/crt/po-management");
+      const snap = await firestoreHelpers.getDoc(firestoreHelpers.doc(db, "users", cred.user.uid));
+      const isAdmin = !!canonicalAdminRole(snap.exists() ? snap.data() : null);
+      router.push(isAdmin ? "/Admin/crt/po-management" : "/dashboard");
     } catch (err) {
       setError(err?.message || "Login failed. Check your email and password.");
     } finally {

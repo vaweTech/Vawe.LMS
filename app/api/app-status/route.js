@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   adminDb,
   readDocumentViaRest,
+  shouldUseFirestoreSdkDirect,
   writeDocumentViaRest,
 } from "@/lib/firebaseAdmin";
 
@@ -10,7 +11,7 @@ export const revalidate = 0;
 
 async function readDisabledFlag() {
   try {
-    if (adminDb) {
+    if (adminDb && shouldUseFirestoreSdkDirect()) {
       const snap = await adminDb.collection("appConfig").doc("runtime").get();
       if (!snap.exists) {
         return { disabled: false, updatedAt: null, updatedBy: null };
@@ -50,7 +51,7 @@ async function writeDisabledFlag(disabled, updatedBy = "vawemap") {
   };
 
   try {
-    if (adminDb) {
+    if (adminDb && shouldUseFirestoreSdkDirect()) {
       await adminDb.collection("appConfig").doc("runtime").set(payload, { merge: true });
       return payload;
     }
