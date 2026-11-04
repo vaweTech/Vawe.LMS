@@ -202,3 +202,68 @@ input:focus-visible {
 .animate-shimmer {
   animation: shimmer 2s infinite;
 }
+
+/* Login brand icon */
+@keyframes login-icon-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-6px) rotate(-4deg);
+  }
+}
+
+@keyframes login-ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes login-glow-pulse {
+  0%,
+  100% {
+    transform: scale(0.9);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0;
+  }
+}
+
+.animate-login-icon-float {
+  animation: login-icon-float 3s ease-in-out infinite;
+}
+
+.animate-login-ring-spin {
+  animation: login-ring-spin 6s linear infinite;
+}
+
+@keyframes login-orbit-reverse {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.animate-login-orbit-a {
+  animation: login-ring-spin 3.2s linear infinite;
+}
+
+.animate-login-orbit-b {
+  animation: login-orbit-reverse 4.4s linear infinite;
+}
+
+.animate-login-glow-pulse {
+  animation: login-glow-pulse 2.4s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-login-icon-float,
+  .animate-login-ring-spin,
+  .animate-login-orbit-a,
+  .animate-login-orbit-b,
+  .animate-login-glow-pulse {
+    animation: none;
+  }
+}

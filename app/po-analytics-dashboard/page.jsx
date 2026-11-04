@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {  BarChart3,  Building2,  Download,  IndianRupee,  Lightbulb,  Pencil,  Plus,  RefreshCw,  TrendingUp,  Users,  Trash2,  UserX,  X,} from "lucide-react";
 import { serverTimestamp, Timestamp } from "firebase/firestore";
 import { auth, db, firestoreHelpers, isFirebaseConfigured } from "../../lib/firebase";
+import { companyKey, csvEscape, subscribeDrives, validateOfferRows } from "@/lib/crtPlacementData";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -583,6 +584,56 @@ const TableSection = ({ title, headers, rows, renderRow, id: sectionId }) => (
   </Card>
 );
 
+const OTHER_COMPANY = "__other__";
+
+/** Company dropdown fed by Placements page drives, with an "Other" free-text fallback. */
+function CompanyPicker({ value, onChange, companies, className, disabled }) {
+  const matched = companies.find((c) => companyKey(c) === companyKey(value));
+  const [otherMode, setOtherMode] = useState(Boolean(value) && !matched);
+  const showOther = otherMode || (Boolean(value) && !matched);
+
+  return (
+    <div className="space-y-2">
+      <select
+        value={showOther ? OTHER_COMPANY : matched || ""}
+        disabled={disabled}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (next === OTHER_COMPANY) {
+            setOtherMode(true);
+            onChange("");
+          } else {
+            setOtherMode(false);
+            onChange(next);
+          }
+        }}
+        className={className}
+      >
+        <option value="">Select company</option>
+        {companies.map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+        <option value={OTHER_COMPANY}>Other (not in list)</option>
+      </select>
+      {showOther && (
+        <input
+          type="text"
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value)}
+          className={className}
+          placeholder="Enter company name"
+          autoComplete="organization"
+          maxLength={80}
+          autoFocus
+        />
+      )}
+    </div>
+  );
+}
+
 export default function CRTPOAnalyticsDashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState(null);
@@ -604,6 +655,7 @@ export default function CRTPOAnalyticsDashboardPage() {
   const [editOffersList, setEditOffersList] = useState([]);
   const [editOffersLoading, setEditOffersLoading] = useState(false);
   const [placementEditSaving, setPlacementEditSaving] = useState(false);
+  const [driveCompanies, setDriveCompanies] = useState([]);
 
   const [filters, setFilters] = useState({
     academicYear: "All",
@@ -669,6 +721,21 @@ export default function CRTPOAnalyticsDashboardPage() {
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (!user || !hasAccess) return undefined;
+    return subscribeDrives(
+      (drives) => {
+        const byKey = new Map();
+        drives.forEach((d) => {
+          const key = companyKey(d.companyName);
+          if (key && !byKey.has(key)) byKey.set(key, d.companyName);
+        });
+        setDriveCompanies([...byKey.values()].sort((a, b) => a.localeCompare(b)));
+      },
+      (err) => console.error("Failed to load placement drives", err)
+    );
+  }, [user, hasAccess]);
+
   const markStudentPlaced = useCallback(
     async (s) => {
       if (!s?.id || !db) return;
@@ -703,14 +770,19 @@ export default function CRTPOAnalyticsDashboardPage() {
   const submitAdditionalOffer = useCallback(async () => {
     const s = offerModalStudent;
     if (!s?.id || !db) return;
-    const company = offerForm.company.trim();
-    if (!company) {
-      alert("Enter company name.");
+    const check = validateOfferRows([
+      { company: offerForm.company, packageLpa: offerForm.packageLpa },
+    ]);
+    if (!check.ok || check.cleaned.length === 0) {
+      alert(check.errors.join("\n") || "Enter company name and package.");
       return;
     }
-    const pkg = parsePackageLpa(offerForm.packageLpa);
-    if (!Number.isFinite(pkg) || pkg <= 0) {
-      alert("Enter a valid package (LPA), e.g. 6.5");
+    const { company, packageLpa: pkg } = check.cleaned[0];
+    const duplicate = (s.offersList || []).some(
+      (o) => companyKey(o.company) === companyKey(company)
+    );
+    if (duplicate) {
+      alert(`${s.name} already has an offer from ${company}. Use Edit to change it.`);
       return;
     }
     setOfferSaving(true);
@@ -752,14 +824,10 @@ export default function CRTPOAnalyticsDashboardPage() {
       return;
     }
 
-    for (const r of rowsWithCompany) {
-      const pkg = parsePackageLpa(r.packageLpa);
-      if (!Number.isFinite(pkg) || pkg < 0) {
-        alert(
-          `Enter a valid package (LPA) for “${String(r.company).trim()}”.`
-        );
-        return;
-      }
+    const check = validateOfferRows(editOffersList);
+    if (!check.ok) {
+      alert(check.errors.join("\n"));
+      return;
     }
 
     if (rowsWithCompany.length === 0) {
@@ -1013,7 +1081,9 @@ export default function CRTPOAnalyticsDashboardPage() {
       "RegNo,Name,Department,Status,Company,PackageLPA,OfferDate",
       ...filteredStudents.map(
         ({ regNo, name, department, status, company, packageLpa, offerDate }) =>
-          `"${regNo}","${String(name).replace(/"/g, '""')}","${department}","${status}","${company}",${packageLpa},"${offerDate}"`
+          [regNo, name, department, status, company, packageLpa, offerDate]
+            .map(csvEscape)
+            .join(",")
       ),
     ].join("\n");
 
@@ -1535,15 +1605,14 @@ export default function CRTPOAnalyticsDashboardPage() {
                   <label className="block text-xs font-semibold text-slate-600 mb-1.5">
                     Company name
                   </label>
-                  <input
-                    type="text"
+                  <CompanyPicker
                     value={offerForm.company}
-                    onChange={(e) =>
-                      setOfferForm((f) => ({ ...f, company: e.target.value }))
+                    companies={driveCompanies}
+                    disabled={offerSaving}
+                    onChange={(company) =>
+                      setOfferForm((f) => ({ ...f, company }))
                     }
-                    className="w-full rounded-2xl border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
-                    placeholder="e.g. Accenture"
-                    autoComplete="organization"
+                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
                   />
                 </div>
                 <div>
@@ -1665,20 +1734,18 @@ export default function CRTPOAnalyticsDashboardPage() {
                             <label className="block text-xs font-semibold text-slate-600 mb-1">
                               Company
                             </label>
-                            <input
-                              type="text"
+                            <CompanyPicker
                               value={row.company}
-                              onChange={(e) =>
+                              companies={driveCompanies}
+                              disabled={placementEditSaving}
+                              onChange={(company) =>
                                 setEditOffersList((prev) =>
                                   prev.map((r, i) =>
-                                    i === index
-                                      ? { ...r, company: e.target.value }
-                                      : r
+                                    i === index ? { ...r, company } : r
                                   )
                                 )
                               }
                               className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
-                              placeholder="Company name"
                             />
                           </div>
                           <div>

@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { AlertCircle, MonitorSmartphone } from "lucide-react";
+import { AlertCircle, BookOpen, MonitorSmartphone } from "lucide-react";
 
 const featureTags = [
   { label: "Interactive Learning", className: "bg-orange-100 text-orange-800" },
@@ -31,27 +31,33 @@ export default function LoginCardShell({
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 via-blue-50/70 to-slate-100 px-4 py-8 sm:px-6">
       <div className="w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-[0_20px_60px_-12px_rgba(0,68,138,0.18)] ring-1 ring-slate-200/60">
         <div className="flex flex-col md:flex-row">
-          <div className="flex items-center justify-center bg-gradient-to-br from-slate-100 via-slate-50 to-white p-8 md:w-[42%] md:p-10 lg:p-12">
-            <div className="relative flex items-center justify-center">
-              <div className="absolute h-[min(280px,70vw)] w-[min(280px,70vw)] rounded-full bg-gradient-to-br from-slate-300/40 to-slate-100/80 shadow-inner" />
-              <div className="relative rounded-full bg-gradient-to-br from-slate-200 to-white p-2 shadow-lg ring-4 ring-white/90">
-                <div className="overflow-hidden rounded-full bg-white">
-                  <Image
-                    src="/LmsImg.jpg"
-                    alt="VAWE LMS"
-                    width={260}
-                    height={260}
-                    className="h-[min(240px,62vw)] w-[min(240px,62vw)] object-cover"
-                    priority
-                  />
-                </div>
-              </div>
-            </div>
+          <div className="flex items-center justify-center p-8 md:w-[42%] md:p-10 lg:p-12">
+            <Image
+              src="/vawe-emblem.png"
+              alt="VAWE - Value Added Work for Empowerment"
+              width={723}
+              height={684}
+              className="h-auto w-[min(280px,70vw)] object-contain"
+              priority
+            />
           </div>
 
           <div className="flex flex-col justify-center px-6 py-8 sm:px-10 sm:py-10 md:w-[58%] lg:px-12">
-            <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-full border-[3px] border-[#00448a] bg-white shadow-sm">
-              <div className="h-5 w-5 rounded-full bg-[#00448a]/15 ring-2 ring-[#00448a]/30" />
+            <div className="relative mx-auto mb-4 flex h-20 w-20 items-center justify-center" aria-hidden>
+              <span className="animate-login-glow-pulse absolute inset-3 rounded-full bg-[#00448a]/25" />
+              <span className="absolute inset-0" style={{ transform: "rotate(60deg) scaleY(0.38)" }}>
+                <span className="animate-login-orbit-a relative block h-full w-full rounded-full border-2 border-[#00448a]/70">
+                  <span className="absolute -top-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full bg-amber-400 shadow-[0_0_6px_2px_rgba(251,191,36,0.7)]" />
+                </span>
+              </span>
+              <span className="absolute inset-0" style={{ transform: "rotate(-60deg) scaleY(0.38)" }}>
+                <span className="animate-login-orbit-b relative block h-full w-full rounded-full border-2 border-cyan-500/70">
+                  <span className="absolute -bottom-[5px] left-1/2 h-2.5 w-2.5 -translate-x-1/2 rounded-full bg-cyan-400 shadow-[0_0_6px_2px_rgba(34,211,238,0.7)]" />
+                </span>
+              </span>
+              <span className="animate-login-icon-float relative flex h-10 w-10 items-center justify-center rounded-full bg-[#00448a] text-white shadow-lg shadow-[#00448a]/30">
+                <BookOpen className="h-5 w-5" strokeWidth={2.2} />
+              </span>
             </div>
 
             <div className="text-center">

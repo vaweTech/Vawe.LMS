@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import { db, firestoreHelpers } from "../../../../lib/firebase";
 import { useAdminAccess } from "../../AdminAccessContext";
@@ -12,10 +12,8 @@ import {
 } from "@heroicons/react/24/solid";
 import { tenantSegments } from "@/lib/tenantPath";
 import {
-  buildStudentBatchMap,
   fetchAllTestOptions,
-  fetchAllSubmissionsForCrt,
-  fetchSubmissionsForTestOption,
+  fetchAllSubmissionsForCrtWithStatus,
   fetchBatchRoster,
   fetchCrtBatches,
   buildBatchAttendanceGroups,
@@ -25,9 +23,39 @@ import {
   buildBatchStudentOverview,
   partitionAttendance,
   submissionPercent,
+  submissionMatchesStudent,
   invalidateCrtProgramCache,
 } from "@/lib/crtTestSubmissions";
 import AttendanceDetailModal from "@/components/crt/AttendanceDetailModal";
+
+const PASS_PERCENT = 40;
+
+function StatCard({ label, value, hint, tone = "cyan" }) {
+  const tones = {
+    cyan: "from-cyan-500 to-blue-600",
+    emerald: "from-emerald-500 to-teal-600",
+    violet: "from-violet-500 to-indigo-600",
+    rose: "from-rose-500 to-red-600",
+  };
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+      <div className={`mb-3 h-1.5 w-10 rounded-full bg-gradient-to-r ${tones[tone]}`} />
+      <p className="text-xs font-medium text-gray-500">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-gray-900 tabular-nums">{value}</p>
+      {hint ? <p className="mt-0.5 text-xs text-gray-500">{hint}</p> : null}
+    </div>
+  );
+}
+
+function friendlyLoadError(e) {
+  if (e?.code === "permission-denied") {
+    return "Permission denied while reading CRT data. Check Firestore rules for this admin account.";
+  }
+  if (e?.code === "unavailable" || /network|offline/i.test(String(e?.message || ""))) {
+    return "Could not reach Firebase. Check your internet connection and click Refresh.";
+  }
+  return e?.message || "Could not load CRT data.";
+}
 
 function flattenQuestions(sections) {
   if (!Array.isArray(sections)) return [];
@@ -96,6 +124,10 @@ export default function CRTTestSubmissionPage() {
   const [loadingProgram, setLoadingProgram] = useState(false);
   const [detailModal, setDetailModal] = useState(null);
   const [cacheHint, setCacheHint] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [failedTests, setFailedTests] = useState([]);
+  const pendingSubjectRef = useRef("");
+  const [overviewTab, setOverviewTab] = useState("day");
 
   const isBatchOverview = Boolean(
     selectedBatchId && !selectedDayKey && !selectedSubjectId
@@ -120,15 +152,20 @@ export default function CRTTestSubmissionPage() {
   );
 
   const fetchCrts = useCallback(async () => {
-    const snap = await firestoreHelpers.getDocs(
-      firestoreHelpers.collection(db, ...tenantSegments(collegeSubdomain, "crt"))
-    );
-    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    setCrts(list);
-    if (list.length > 0 && !selectedCrtId) {
-      setSelectedCrtId(list[0].id);
+    try {
+      const snap = await firestoreHelpers.getDocs(
+        firestoreHelpers.collection(db, ...tenantSegments(collegeSubdomain, "crt"))
+      );
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setCrts(list);
+      setSelectedCrtId((current) =>
+        current && list.some((c) => c.id === current) ? current : list[0]?.id || ""
+      );
+    } catch (e) {
+      console.error(e);
+      setLoadError(friendlyLoadError(e));
     }
-  }, [selectedCrtId, collegeSubdomain]);
+  }, [collegeSubdomain]);
 
   useEffect(() => {
     if (!user) return;
@@ -184,6 +221,7 @@ export default function CRTTestSubmissionPage() {
         setCacheHint(forceRefresh ? "Loaded fresh from Firebase" : "Using session cache when available");
       } catch (e) {
         console.error(e);
+        setLoadError(friendlyLoadError(e));
         setBatches([]);
         setTests([]);
         setBatchRoster([]);
@@ -211,9 +249,12 @@ export default function CRTTestSubmissionPage() {
   );
 
   useEffect(() => {
-    setSelectedSubjectId("");
+    const pending = pendingSubjectRef.current;
+    pendingSubjectRef.current = "";
     if (selectedDayKey === "crt_exams") {
       setSelectedSubjectId("crt_exams");
+    } else {
+      setSelectedSubjectId(pending || "");
     }
   }, [selectedDayKey]);
 
@@ -238,65 +279,36 @@ export default function CRTTestSubmissionPage() {
         invalidateCrtProgramCache(collegeSubdomain, selectedCrtId);
       }
       setLoadingData(true);
+      setLoadError("");
+      setFailedTests([]);
       try {
-        const cacheOptions = { forceRefresh };
-        const batchMap = await buildStudentBatchMap(
-          db,
-          firestoreHelpers,
-          collegeSubdomain,
-          selectedCrtId,
-          cacheOptions
-        );
-
-        const allSubs = await fetchAllSubmissionsForCrt(
-          db,
-          firestoreHelpers,
-          collegeSubdomain,
-          selectedCrtId,
-          cacheOptions
-        );
-        setAllSubmissions(allSubs);
-
-        if (!isDetailView) {
-          setSubmissions([]);
-          setCacheHint(
-            forceRefresh
-              ? "Loaded fresh from Firebase"
-              : "Session cache used (5 min TTL) — click Refresh for latest"
-          );
-          return;
-        }
-
-        const testsToLoad = activeTests;
-        const combined = [];
-        for (const test of testsToLoad) {
-          const rows = await fetchSubmissionsForTestOption(
+        const { submissions: allSubs, failedTests: failed, fromCache } =
+          await fetchAllSubmissionsForCrtWithStatus(
             db,
             firestoreHelpers,
             collegeSubdomain,
             selectedCrtId,
-            test,
-            batchMap,
-            cacheOptions
+            { forceRefresh }
           );
-          combined.push(
-            ...rows.map((row) => ({
-              ...row,
-              testKey: test.key,
-              testLabel: test.label,
-            }))
-          );
+        setAllSubmissions(allSubs);
+        setFailedTests(failed);
+
+        if (isDetailView) {
+          const keys = new Set(activeTests.map((t) => t.key));
+          setSubmissions(allSubs.filter((s) => keys.has(s.testKey)));
+        } else {
+          setSubmissions([]);
         }
-        setSubmissions(combined);
         setCacheHint(
-          forceRefresh
-            ? "Loaded fresh from Firebase"
-            : "Session cache used (5 min TTL) — click Refresh for latest"
+          fromCache
+            ? `Session cache used (5 min TTL) — ${allSubs.length} submission(s). Click Refresh for latest.`
+            : `Loaded fresh from Firebase — ${allSubs.length} submission(s).`
         );
       } catch (e) {
         console.error(e);
         setAllSubmissions([]);
         setSubmissions([]);
+        setLoadError(friendlyLoadError(e));
       } finally {
         setLoadingData(false);
       }
@@ -331,6 +343,60 @@ export default function CRTTestSubmissionPage() {
     selectedSubjectId,
     allSubmissions,
   ]);
+
+  const dayWiseSummary = useMemo(() => {
+    if (!isBatchOverview) return [];
+    const dayTests = tests
+      .filter((t) => t.sourceType === "day_test")
+      .sort(
+        (a, b) =>
+          (Number(a.day) || 0) - (Number(b.day) || 0) ||
+          (a.courseTitle || "").localeCompare(b.courseTitle || "")
+      );
+    const byDay = new Map();
+    for (const test of dayTests) {
+      const subs = allSubmissions.filter((s) => s.testKey === test.key);
+      const attended = [];
+      for (const student of rosterInBatch) {
+        const sub = subs.find((s) => submissionMatchesStudent(s, student));
+        if (sub) attended.push(sub);
+      }
+      const scores = attended.map(submissionPercent).filter((p) => p != null);
+      const day = Number(test.day) || 0;
+      if (!byDay.has(day)) byDay.set(day, []);
+      byDay.get(day).push({
+        test,
+        attendedCount: attended.length,
+        scores,
+        passCount: scores.filter((p) => p >= PASS_PERCENT).length,
+        failCount: scores.filter((p) => p < PASS_PERCENT).length,
+        avgPercent: scores.length
+          ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+          : null,
+      });
+    }
+    return [...byDay.entries()].map(([day, rows]) => ({ day, rows }));
+  }, [isBatchOverview, tests, allSubmissions, rosterInBatch]);
+
+  const overviewStats = useMemo(() => {
+    const rows = dayWiseSummary.flatMap((d) => d.rows);
+    const students = rosterInBatch.length;
+    const attendedTotal = rows.reduce((s, r) => s + r.attendedCount, 0);
+    const allScores = rows.flatMap((r) => r.scores);
+    const notStarted = batchStudentOverview.filter((s) => s.attendedCount === 0).length;
+    return {
+      testCount: rows.length,
+      attendancePercent:
+        rows.length && students
+          ? Math.round((attendedTotal / (rows.length * students)) * 100)
+          : null,
+      avgPercent: allScores.length
+        ? Math.round(allScores.reduce((a, b) => a + b, 0) / allScores.length)
+        : null,
+      notStarted,
+      students,
+    };
+  }, [dayWiseSummary, rosterInBatch, batchStudentOverview]);
 
   const singleTestAttendance = useMemo(() => {
     if (!isDetailView || rosterInBatch.length === 0) {
@@ -545,6 +611,34 @@ export default function CRTTestSubmissionPage() {
           <p className="text-xs text-gray-500 mb-4 -mt-4">{cacheHint}</p>
         ) : null}
 
+        {loadError ? (
+          <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            {loadError}
+          </div>
+        ) : null}
+
+        {failedTests.length > 0 ? (
+          <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p className="font-semibold">
+              Results for {failedTests.length} test(s) could not be loaded. Other results are shown.
+            </p>
+            <ul className="mt-1 list-disc pl-5 text-amber-800">
+              {failedTests.slice(0, 5).map((t) => (
+                <li key={t.label}>
+                  {t.label}
+                  {t.code === "permission-denied" ? " — permission denied" : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {!loadingProgram && selectedCrtId && tests.length === 0 && !loadError ? (
+          <div className="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
+            No tests found for this CRT program. Add CRT exams or day tests to its courses first.
+          </div>
+        ) : null}
+
         {selectedCrt && selectedBatch ? (
           <div className="mb-4 p-3 bg-white rounded-lg border border-gray-200 flex flex-wrap items-center gap-3 text-sm">
             <span className="font-medium text-gray-700">
@@ -602,6 +696,157 @@ export default function CRTTestSubmissionPage() {
             Select a CRT program and batch to view reports.
           </div>
         ) : isBatchOverview ? (
+          <>
+          <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatCard
+              label="Day tests conducted"
+              value={overviewStats.testCount}
+              hint={`${overviewStats.students} student(s) in batch`}
+            />
+            <StatCard
+              label="Overall attendance"
+              value={overviewStats.attendancePercent != null ? `${overviewStats.attendancePercent}%` : "—"}
+              hint="Submissions vs expected"
+              tone="emerald"
+            />
+            <StatCard
+              label="Average MCQ score"
+              value={overviewStats.avgPercent != null ? `${overviewStats.avgPercent}%` : "—"}
+              hint={`Pass mark ${PASS_PERCENT}%`}
+              tone="violet"
+            />
+            <StatCard
+              label="Not attempted any test"
+              value={overviewStats.notStarted}
+              hint="Students needing follow-up"
+              tone="rose"
+            />
+          </div>
+
+          <div className="mb-4 inline-flex rounded-xl border border-gray-200 bg-white p-1 shadow-sm" role="tablist">
+            {[
+              { id: "day", label: "By day" },
+              { id: "student", label: "By student" },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={overviewTab === tab.id}
+                onClick={() => setOverviewTab(tab.id)}
+                className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                  overviewTab === tab.id
+                    ? "bg-cyan-600 text-white shadow"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {overviewTab === "day" ? (
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-4 py-3 bg-gradient-to-r from-cyan-50 to-blue-50 border-b border-gray-200 flex flex-wrap items-center gap-2">
+              <DocumentTextIcon className="w-5 h-5 text-cyan-600" />
+              <h2 className="font-semibold text-gray-800">Day-wise assignments</h2>
+              <span className="text-sm text-gray-500">
+                {rosterInBatch.length} student(s) in {selectedBatch.name}
+              </span>
+            </div>
+            {dayWiseSummary.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-gray-500">
+                No day assignments found for the courses in this CRT program.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-600 text-sm">
+                      <th className="px-4 py-3 font-medium">Day</th>
+                      <th className="px-4 py-3 font-medium">Subject</th>
+                      <th className="px-4 py-3 font-medium">Assignment</th>
+                      <th className="px-4 py-3 font-medium">Type</th>
+                      <th className="px-4 py-3 font-medium text-center">Attended</th>
+                      <th className="px-4 py-3 font-medium text-center">Result</th>
+                      <th className="px-4 py-3 font-medium text-right">Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dayWiseSummary.map(({ day, rows }) =>
+                      rows.map(({ test, attendedCount, avgPercent, passCount, failCount }, i) => (
+                        <tr key={test.key} className="border-t border-gray-100 hover:bg-gray-50/50">
+                          {i === 0 && (
+                            <td
+                              rowSpan={rows.length}
+                              className="px-4 py-3 align-top font-semibold text-cyan-700 whitespace-nowrap"
+                            >
+                              Day {day || "—"}
+                            </td>
+                          )}
+                          <td className="px-4 py-3 text-gray-700">{test.courseTitle}</td>
+                          <td className="px-4 py-3 font-medium text-gray-800">{test.name}</td>
+                          <td className="px-4 py-3">
+                            <span
+                              className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                test.type === "coding"
+                                  ? "bg-violet-100 text-violet-800"
+                                  : "bg-cyan-100 text-cyan-800"
+                              }`}
+                            >
+                              {test.type === "coding" ? "Coding" : "MCQ"}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span
+                              className={`inline-flex min-w-[3rem] justify-center px-2.5 py-1 rounded-full text-sm font-semibold ${
+                                rosterInBatch.length > 0 && attendedCount === rosterInBatch.length
+                                  ? "bg-emerald-100 text-emerald-800"
+                                  : attendedCount > 0
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-red-100 text-red-800"
+                              }`}
+                            >
+                              {attendedCount} / {rosterInBatch.length}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            {test.type === "coding" ? (
+                              <span className="text-xs text-gray-500">Not auto-scored</span>
+                            ) : avgPercent == null ? (
+                              <span className="text-xs text-gray-400">No submissions</span>
+                            ) : (
+                              <div className="inline-flex flex-col items-center">
+                                <span className="text-sm font-semibold text-gray-800">Avg {avgPercent}%</span>
+                                <span className="text-xs">
+                                  <span className="text-emerald-700">{passCount} pass</span>
+                                  <span className="text-gray-400"> · </span>
+                                  <span className="text-red-600">{failCount} fail</span>
+                                </span>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                pendingSubjectRef.current = test.courseId;
+                                setSelectedDayKey(`day:${day}`);
+                              }}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-600 text-white text-xs font-medium hover:bg-cyan-700"
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          ) : (
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
             <div className="px-4 py-3 bg-gradient-to-r from-violet-50 to-cyan-50 border-b border-gray-200 flex flex-wrap items-center gap-2">
               <UserGroupIcon className="w-5 h-5 text-violet-600" />
@@ -696,6 +941,8 @@ export default function CRTTestSubmissionPage() {
               </table>
             </div>
           </div>
+          )}
+          </>
         ) : needsSubjectSelection ? (
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-8 text-center text-gray-500">
             Select a <strong>subject</strong> for {dayLabel} to view attendance

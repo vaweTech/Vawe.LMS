@@ -25,7 +25,14 @@ import {
   transformMockCompilerInput,
   buildMockSectionScores,
   buildMockSubSectionScores,
+  mockTestAttemptPercent,
 } from "@/lib/mockTests";
+import { makeAuthenticatedRequest } from "@/lib/authUtils";
+import {
+  MOCK_RESULT_WA_TEMPLATE,
+  buildMockResultWhatsAppParams,
+  pickStudentPhone,
+} from "@/lib/mockTestResultWhatsApp";
 import { useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
 
@@ -436,6 +443,9 @@ export default function TakeMockTestPage() {
     }
 
     const score = { mcqCorrect, mcqTotal, codingScore, codingMax };
+    const sectionScores = buildMockSectionScores(questionBreakdown);
+    const subSectionScores = buildMockSubSectionScores(questionBreakdown);
+    const submittedAt = new Date().toISOString();
 
     setScoreDetail(score);
     setSubmitted(true);
@@ -446,18 +456,23 @@ export default function TakeMockTestPage() {
       try {
         let name = user.displayName || "";
         let email = user.email || "";
+        let phone = "";
         if (db) {
           const [userSnap, studentSnap] = await Promise.all([
             getDoc(doc(db, "users", user.uid)),
             getDoc(doc(db, "students", user.uid)),
           ]);
           if (studentSnap.exists()) {
-            name = studentSnap.data()?.name || name;
-            email = studentSnap.data()?.email || email;
+            const studentData = studentSnap.data() || {};
+            name = studentData.name || name;
+            email = studentData.email || email;
+            phone = pickStudentPhone(studentData);
           }
           if (userSnap.exists()) {
-            name = userSnap.data()?.name || name;
-            email = userSnap.data()?.email || email;
+            const userData = userSnap.data() || {};
+            name = userData.name || name;
+            email = userData.email || email;
+            if (!phone) phone = pickStudentPhone(userData);
           }
         }
         await saveMockTestSubmission(companySlug, testId, {
@@ -468,14 +483,39 @@ export default function TakeMockTestPage() {
           mcqAnswered,
           codingAttempted,
           questionBreakdown,
-          sectionScores: buildMockSectionScores(questionBreakdown),
-          subSectionScores: buildMockSubSectionScores(questionBreakdown),
+          sectionScores,
+          subSectionScores,
         });
+        if (phone) {
+          const waRes = await makeAuthenticatedRequest("/api/send-whatsapp-template", {
+            method: "POST",
+            body: JSON.stringify({
+              phone,
+              template: MOCK_RESULT_WA_TEMPLATE,
+              language: "en",
+              bodyParams: buildMockResultWhatsAppParams({
+                name,
+                testTitle: test?.title || "Mock Test",
+                testId,
+                submittedAt,
+                ...score,
+                percent: mockTestAttemptPercent(score),
+                sectionScores,
+                subSectionScores,
+                questionBreakdown,
+              }),
+            }),
+          });
+          if (!waRes.ok) {
+            const waErr = await waRes.json().catch(() => ({}));
+            console.error("Failed to send mock test WhatsApp result:", waErr.error || waRes.status);
+          }
+        }
       } catch (e) {
         console.error("Failed to save mock test result:", e);
       }
     }
-  }, [questions, answers, codeLanguages, markSubmitted, companySlug, testId]);
+  }, [questions, answers, codeLanguages, markSubmitted, companySlug, testId, test?.title]);
 
   useEffect(() => {
     setOnTimeUp(() => {

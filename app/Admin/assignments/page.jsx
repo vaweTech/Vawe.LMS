@@ -1,12 +1,43 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { db } from "../../../lib/firebase";
 import { mcqDb } from "../../../lib/firebaseMCQs";
 import { collection, getDocs } from "firebase/firestore";
 import CheckAdminAuth from "../../../lib/CheckAdminAuth";
-import { ChartBar, Users, FileCheck, Trophy, Search, BookOpen, Layers, ChevronRight } from "lucide-react";
+import { ChartBar, Users, FileCheck, Trophy, Search, BookOpen, Layers, ChevronRight, ChevronDown, Download, RefreshCw } from "lucide-react";
+import AssignmentSubmissionsReport from "@/components/admin/AssignmentSubmissionsReport";
+import { ASSIGNMENT_PASS_PERCENT, assignmentPercent, downloadCsv, toDate } from "@/lib/assignmentScores";
+
+function friendlyError(e) {
+  if (e?.code === "permission-denied") return "Permission denied while reading assignment data. Check Firestore rules for this admin account.";
+  if (e?.code === "unavailable" || /network|offline/i.test(String(e?.message || ""))) {
+    return "Could not reach Firebase. Check your internet connection and try again.";
+  }
+  return e?.message || "Something went wrong while loading assignment data.";
+}
+
+function compareAssignments(a, b) {
+  return (Number(a.day) || 1) - (Number(b.day) || 1) || String(a.title || "").localeCompare(String(b.title || ""));
+}
+
+async function loadSubmissions(path) {
+  const snap = await getDocs(collection(mcqDb, ...path));
+  return snap.docs.map((d) => {
+    const data = d.data();
+    return { id: d.id, ...data, submittedAt: toDate(data.submittedAt) };
+  });
+}
+
+function ErrorBanner({ message }) {
+  if (!message) return null;
+  return (
+    <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+      {message}
+    </div>
+  );
+}
 
 const TAB_PROGRESS = "progress";
 const TAB_INTERNSHIP = "internship";
@@ -58,6 +89,12 @@ export default function AdminAssignmentsPage() {
   const [analyticsViewMode, setAnalyticsViewMode] = useState("student"); // "student" | "subject" | "batch"
   const [internshipCoursesForAnalytics, setInternshipCoursesForAnalytics] = useState([]);
   const [expandedStudentId, setExpandedStudentId] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [submissionsError, setSubmissionsError] = useState("");
+  const [analyticsError, setAnalyticsError] = useState("");
+  const [analyticsFailedCount, setAnalyticsFailedCount] = useState(0);
+  const [loadingSubmissions, setLoadingSubmissions] = useState(false);
+  const [analyticsReloadKey, setAnalyticsReloadKey] = useState(0);
 
   useEffect(() => {
     fetchCourses();
@@ -71,22 +108,26 @@ export default function AdminAssignmentsPage() {
     try {
       // Fetch all courses from primary Firebase
       const coursesSnap = await getDocs(collection(db, "courses"));
-      const coursesData = [];
-      
-      for (const courseDoc of coursesSnap.docs) {
-        const courseData = { id: courseDoc.id, ...courseDoc.data() };
-        
-        // Fetch assignments for each course from MCQ Firebase
-        const assignmentsSnap = await getDocs(collection(mcqDb, "courses", courseDoc.id, "assignments"));
-        courseData.assignments = assignmentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        
-        // Add all courses (even if they don't have assignments yet)
-        coursesData.push(courseData);
-      }
-      
+      const coursesData = await Promise.all(
+        coursesSnap.docs.map(async (courseDoc) => {
+          const courseData = { id: courseDoc.id, ...courseDoc.data(), assignments: [] };
+          try {
+            const assignmentsSnap = await getDocs(collection(mcqDb, "courses", courseDoc.id, "assignments"));
+            courseData.assignments = assignmentsSnap.docs
+              .map((d) => ({ id: d.id, ...d.data() }))
+              .sort(compareAssignments);
+          } catch (e) {
+            console.error(`Assignments for course ${courseDoc.id}:`, e);
+            courseData.assignmentsError = true;
+          }
+          return courseData;
+        })
+      );
+      coursesData.sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
       setCourses(coursesData);
     } catch (error) {
       console.error("Error fetching courses:", error);
+      setLoadError(friendlyError(error));
     } finally {
       setLoading(false);
     }
@@ -99,6 +140,7 @@ export default function AdminAssignmentsPage() {
       setInternships(list);
     } catch (error) {
       console.error("Error fetching internships:", error);
+      setLoadError(friendlyError(error));
     } finally {
       setLoadingInternships(false);
     }
@@ -113,116 +155,102 @@ export default function AdminAssignmentsPage() {
       const coursesSnap = await getDocs(
         collection(db, "internships", internshipId, "courses")
       );
-      const coursesData = [];
-      for (const courseDoc of coursesSnap.docs) {
-        const courseData = { id: courseDoc.id, ...courseDoc.data() };
-        const assignmentsSnap = await getDocs(
-          collection(mcqDb, "copiedcourses", courseDoc.id, "assignments")
-        );
-        courseData.assignments = assignmentsSnap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-        }));
-        coursesData.push(courseData);
-      }
+      const coursesData = await Promise.all(
+        coursesSnap.docs.map(async (courseDoc) => {
+          const assignmentsSnap = await getDocs(
+            collection(mcqDb, "copiedcourses", courseDoc.id, "assignments")
+          );
+          return {
+            id: courseDoc.id,
+            ...courseDoc.data(),
+            assignments: assignmentsSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(compareAssignments),
+          };
+        })
+      );
       setInternshipCourses(coursesData);
     } catch (error) {
       console.error("Error fetching internship courses:", error);
+      setSubmissionsError(friendlyError(error));
       setInternshipCourses([]);
     }
   };
 
   const fetchSubmissions = async (courseId, assignmentId) => {
+    setLoadingSubmissions(true);
+    setSubmissionsError("");
     try {
-      // Fetch submissions from MCQ Firebase
-      const submissionsSnap = await getDocs(
-        collection(mcqDb, "courses", courseId, "assignments", assignmentId, "submissions")
-      );
-      
-      const submissionsData = submissionsSnap.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        submittedAt: doc.data().submittedAt?.toDate?.() || new Date()
-      }));
-      
-      // Sort by submission date (newest first)
-      submissionsData.sort((a, b) => b.submittedAt - a.submittedAt);
-      
-      setSubmissions(submissionsData);
+      setSubmissions(await loadSubmissions(["courses", courseId, "assignments", assignmentId, "submissions"]));
     } catch (error) {
       console.error("Error fetching submissions:", error);
+      setSubmissions([]);
+      setSubmissionsError(friendlyError(error));
+    } finally {
+      setLoadingSubmissions(false);
     }
   };
 
   const fetchAllSubmissionsForAnalytics = useCallback(async () => {
     setLoadingAnalytics(true);
+    setAnalyticsError("");
+    setAnalyticsFailedCount(0);
     try {
-      const submissions = [];
+      let root = null;
+      let coursesToFetch = [];
       if (analyticsScope === "progress") {
-        const coursesToFetch = analyticsCourse ? [analyticsCourse] : courses;
-        for (const course of coursesToFetch) {
-          const assignments = course.assignments || [];
-          for (const a of assignments) {
-            const snap = await getDocs(
-              collection(mcqDb, "courses", course.id, "assignments", a.id, "submissions")
-            );
-          snap.docs.forEach((d) => {
-            const data = d.data();
-            submissions.push({
-              id: d.id,
-              ...data,
-              studentId: data.studentId || "unknown",
-              studentName: data.studentName || data.userId || "Unknown",
-              courseName: course.title,
-              courseId: course.id,
-              assignmentTitle: a.title,
-              submittedAt: data.submittedAt?.toDate?.() || new Date(),
-              autoScore: typeof data.autoScore === "number" ? data.autoScore : null,
-              testSummary: data.testSummary,
-              batchId: data.batchId || null,
-              batchName: data.batchName || null,
-            });
+        root = "courses";
+        coursesToFetch = analyticsCourse ? [analyticsCourse] : courses;
+      } else if (analyticsScope === "internship" && analyticsInternship) {
+        root = "copiedcourses";
+        coursesToFetch = analyticsInternshipCourse ? [analyticsInternshipCourse] : internshipCoursesForAnalytics;
+      }
+      const jobs = coursesToFetch.flatMap((course) =>
+        (course.assignments || []).map((a) => ({ course, a }))
+      );
+      const results = await Promise.allSettled(
+        jobs.map(({ course, a }) => loadSubmissions([root, course.id, "assignments", a.id, "submissions"]))
+      );
+      const submissions = [];
+      let failed = 0;
+      results.forEach((res, i) => {
+        if (res.status === "rejected") {
+          failed += 1;
+          console.error("Analytics submissions:", res.reason);
+          return;
+        }
+        const { course, a } = jobs[i];
+        for (const data of res.value) {
+          submissions.push({
+            ...data,
+            studentId: data.studentId || "unknown",
+            studentName: data.studentName || data.userId || "Unknown",
+            courseName: course.title,
+            courseId: course.id,
+            assignmentId: a.id,
+            assignmentKey: `${course.id}/${a.id}`,
+            assignmentTitle: a.title,
+            assignmentDay: Number(a.day) || 1,
+            assignmentType: a.type,
+            autoScore: typeof data.autoScore === "number" ? data.autoScore : null,
+            batchId: data.batchId || null,
+            batchName: data.batchName || null,
           });
         }
-        }
-      } else if (analyticsScope === "internship" && analyticsInternship) {
-        const coursesToFetch = analyticsInternshipCourse
-          ? [analyticsInternshipCourse]
-          : internshipCoursesForAnalytics;
-        for (const course of coursesToFetch) {
-          const assignments = course.assignments || [];
-          for (const a of assignments) {
-            const snap = await getDocs(
-              collection(mcqDb, "copiedcourses", course.id, "assignments", a.id, "submissions")
-            );
-            snap.docs.forEach((d) => {
-              const data = d.data();
-              submissions.push({
-                id: d.id,
-                ...data,
-                studentId: data.studentId || "unknown",
-                studentName: data.studentName || data.userId || "Unknown",
-                courseName: course.title,
-                courseId: course.id,
-                assignmentTitle: a.title,
-                submittedAt: data.submittedAt?.toDate?.() || new Date(),
-                autoScore: typeof data.autoScore === "number" ? data.autoScore : null,
-                testSummary: data.testSummary,
-                batchId: data.batchId || null,
-                batchName: data.batchName || null,
-              });
-            });
-          }
-        }
-      }
+      });
       setAllAnalyticsSubmissions(submissions);
+      setAnalyticsFailedCount(failed);
+      if (failed > 0 && failed === jobs.length) {
+        setAnalyticsError(friendlyError(results.find((r) => r.status === "rejected")?.reason));
+      }
     } catch (error) {
       console.error("Error fetching analytics submissions:", error);
       setAllAnalyticsSubmissions([]);
+      setAnalyticsError(friendlyError(error));
     } finally {
       setLoadingAnalytics(false);
     }
-  }, [analyticsScope, analyticsCourse, analyticsInternship, analyticsInternshipCourse, internshipCoursesForAnalytics, courses]);
+    // analyticsReloadKey forces a refetch from the Refresh button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analyticsScope, analyticsCourse, analyticsInternship, analyticsInternshipCourse, internshipCoursesForAnalytics, courses, analyticsReloadKey]);
 
   useEffect(() => {
     async function loadInternshipCoursesForAnalytics() {
@@ -243,7 +271,7 @@ export default function AdminAssignmentsPage() {
             return {
               id: courseDoc.id,
               ...courseDoc.data(),
-              assignments: assignmentsSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
+              assignments: assignmentsSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort(compareAssignments),
             };
           })
         );
@@ -260,7 +288,13 @@ export default function AdminAssignmentsPage() {
     }
   }, [analyticsScope, analyticsInternship]);
 
+  // Analytics reads every submission in scope, so only run it while the Analytics tab is open,
+  // and not again when the admin just switches tabs back and forth.
+  const lastAnalyticsLoadRef = useRef(null);
   useEffect(() => {
+    if (activeTab !== TAB_ANALYTICS) return;
+    if (lastAnalyticsLoadRef.current === fetchAllSubmissionsForAnalytics) return;
+    lastAnalyticsLoadRef.current = fetchAllSubmissionsForAnalytics;
     if (
       (analyticsScope === "progress" && (analyticsCourse || courses.length > 0)) ||
       (analyticsScope === "internship" && analyticsInternship && (analyticsInternshipCourse || internshipCoursesForAnalytics.length > 0))
@@ -269,23 +303,21 @@ export default function AdminAssignmentsPage() {
     } else {
       setAllAnalyticsSubmissions([]);
     }
-  }, [analyticsScope, analyticsCourse, analyticsInternship, analyticsInternshipCourse, internshipCoursesForAnalytics, courses, fetchAllSubmissionsForAnalytics]);
+  }, [activeTab, analyticsScope, analyticsCourse, analyticsInternship, analyticsInternshipCourse, internshipCoursesForAnalytics, courses, fetchAllSubmissionsForAnalytics]);
 
   const fetchInternshipSubmissions = async (courseCopyId, assignmentId) => {
+    setLoadingSubmissions(true);
+    setSubmissionsError("");
     try {
-      const submissionsSnap = await getDocs(
-        collection(mcqDb, "copiedcourses", courseCopyId, "assignments", assignmentId, "submissions")
+      setInternshipSubmissions(
+        await loadSubmissions(["copiedcourses", courseCopyId, "assignments", assignmentId, "submissions"])
       );
-      const submissionsData = submissionsSnap.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        submittedAt: doc.data().submittedAt?.toDate?.() || new Date(),
-      }));
-      submissionsData.sort((a, b) => b.submittedAt - a.submittedAt);
-      setInternshipSubmissions(submissionsData);
     } catch (error) {
       console.error("Error fetching internship submissions:", error);
       setInternshipSubmissions([]);
+      setSubmissionsError(friendlyError(error));
+    } finally {
+      setLoadingSubmissions(false);
     }
   };
 
@@ -296,27 +328,12 @@ export default function AdminAssignmentsPage() {
     return Array.from(types);
   };
 
-  // Get available days for selected course and type
-  const getAvailableDays = (course, type) => {
-    if (!course || !course.assignments || !type) return [];
-    const filteredAssignments = course.assignments.filter(a => a.type === type);
-    const days = filteredAssignments
-      .map(a => a.day || 1)
-      .filter((day, index, self) => self.indexOf(day) === index)
-      .sort((a, b) => a - b);
-    return days;
-  };
+  const assignmentsOfType = (course, type) =>
+    (course?.assignments || []).filter((a) => a.type === type);
 
-  // Get assignment for selected day
-  const getAssignmentForDay = (course, type, day) => {
-    if (!course || !course.assignments || !type || !day) return null;
-    const assignment = course.assignments.find(a => a.type === type && (a.day || 1) === day);
-    return assignment || null;
-  };
-
-  const handleDaySelect = async (day) => {
-    setSelectedDay(day);
-    const assignment = getAssignmentForDay(selectedCourse, selectedAssignmentType, day);
+  const handleDaySelect = async (assignmentId) => {
+    const assignment = assignmentsOfType(selectedCourse, selectedAssignmentType).find((a) => a.id === assignmentId) || null;
+    setSelectedDay(assignment ? assignment.id : null);
     setSelectedAssignment(assignment);
     if (assignment && selectedCourse) {
       await fetchSubmissions(selectedCourse.id, assignment.id);
@@ -344,13 +361,10 @@ export default function AdminAssignmentsPage() {
     setInternshipSubmissions([]);
   };
 
-  const handleInternshipDaySelect = async (day) => {
-    setInternshipDay(day);
-    const assignment = getAssignmentForDay(
-      selectedInternshipCourse,
-      internshipAssignmentType,
-      day
-    );
+  const handleInternshipDaySelect = async (assignmentId) => {
+    const assignment =
+      assignmentsOfType(selectedInternshipCourse, internshipAssignmentType).find((a) => a.id === assignmentId) || null;
+    setInternshipDay(assignment ? assignment.id : null);
     setSelectedInternshipAssignment(assignment);
     if (assignment && selectedInternshipCourse) {
       await fetchInternshipSubmissions(selectedInternshipCourse.id, assignment.id);
@@ -376,57 +390,106 @@ export default function AdminAssignmentsPage() {
     const byUser = new Map();
     for (const sub of allAnalyticsSubmissions) {
       const uid = sub.studentId || "unknown";
-      const percent =
-        sub.autoScore ??
-        (sub.testSummary?.totalCount > 0
-          ? (sub.testSummary.partialScore != null
-            ? (sub.testSummary.partialScore / sub.testSummary.maxScore) * 100
-            : (sub.testSummary.passCount / sub.testSummary.totalCount) * 100)
-          : null);
+      const percent = assignmentPercent(sub);
       if (!byUser.has(uid)) {
         byUser.set(uid, {
           studentId: uid,
           studentName: sub.studentName || "Unknown",
           examsAttended: 0,
+          scoredCount: 0,
+          passedCount: 0,
           totalPercent: 0,
           maxPercent: null,
           lastSubmittedAt: null,
           bySubject: new Map(),
+          byAssignment: new Map(),
         });
       }
       const row = byUser.get(uid);
       row.examsAttended += 1;
       if (percent != null && !Number.isNaN(percent)) {
+        row.scoredCount += 1;
+        if (percent >= ASSIGNMENT_PASS_PERCENT) row.passedCount += 1;
         row.totalPercent += percent;
         row.maxPercent = row.maxPercent == null ? percent : Math.max(row.maxPercent, percent);
       }
-      if (sub.submittedAt) {
-        const t = new Date(sub.submittedAt).getTime();
-        if (!row.lastSubmittedAt || t > row.lastSubmittedAt) row.lastSubmittedAt = t;
-      }
+      const t = sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0;
+      if (t && (!row.lastSubmittedAt || t > row.lastSubmittedAt)) row.lastSubmittedAt = t;
+
+      const prev = row.byAssignment.get(sub.assignmentKey);
+      const prevT = prev?.submittedAt ? new Date(prev.submittedAt).getTime() : -1;
+      if (!prev || t > prevT) row.byAssignment.set(sub.assignmentKey, sub);
+
       const cid = sub.courseId || sub.courseName || "unknown";
-      const cname = sub.courseName || "Unknown";
       if (!row.bySubject.has(cid)) {
-        row.bySubject.set(cid, { courseName: cname, courseId: cid, total: 0, count: 0, max: null });
+        row.bySubject.set(cid, { courseName: sub.courseName || "Unknown", courseId: cid, total: 0, count: 0, scored: 0 });
       }
       const s = row.bySubject.get(cid);
       s.count += 1;
-      s.total += percent != null && !Number.isNaN(percent) ? percent : 0;
-      s.max = s.max == null ? percent : (percent != null ? Math.max(s.max, percent) : s.max);
+      if (percent != null && !Number.isNaN(percent)) {
+        s.scored += 1;
+        s.total += percent;
+      }
     }
-    return Array.from(byUser.values()).map((row) => {
-      const subjectScores = Array.from(row.bySubject.values()).map((s) => ({
+    return Array.from(byUser.values()).map((row) => ({
+      ...row,
+      avgScore: row.scoredCount > 0 ? row.totalPercent / row.scoredCount : null,
+      subjectsAttempted: row.bySubject.size,
+      subjectScores: Array.from(row.bySubject.values()).map((s) => ({
         ...s,
-        avgScore: s.count > 0 ? s.total / s.count : null,
-      }));
-      return {
-        ...row,
-        avgScore: row.examsAttended > 0 ? row.totalPercent / row.examsAttended : null,
-        subjectsAttempted: row.bySubject.size,
-        subjectScores,
-      };
-    });
+        avgScore: s.scored > 0 ? s.total / s.scored : null,
+      })),
+    }));
   }, [allAnalyticsSubmissions]);
+
+  /** Every assignment in the current analytics scope, ordered by course then day. */
+  const analyticsAssignmentList = useMemo(() => {
+    let scopeCourses = [];
+    if (analyticsScope === "progress") scopeCourses = analyticsCourse ? [analyticsCourse] : courses;
+    else if (analyticsInternship) {
+      scopeCourses = analyticsInternshipCourse ? [analyticsInternshipCourse] : internshipCoursesForAnalytics;
+    }
+    return [...scopeCourses]
+      .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")))
+      .flatMap((course) =>
+        [...(course.assignments || [])].sort(compareAssignments).map((a) => ({
+          key: `${course.id}/${a.id}`,
+          courseName: course.title || course.id,
+          title: a.title || a.id,
+          day: Number(a.day) || 1,
+          type: a.type,
+        }))
+      );
+  }, [analyticsScope, analyticsCourse, courses, analyticsInternship, analyticsInternshipCourse, internshipCoursesForAnalytics]);
+
+  const exportAnalyticsCsv = () => {
+    const header = [
+      "#",
+      "Student",
+      "Student ID",
+      "Assignments attempted",
+      "Avg %",
+      "Highest %",
+      `Passed (≥${ASSIGNMENT_PASS_PERCENT}%)`,
+      ...analyticsAssignmentList.map((a) => `${a.courseName} · Day ${a.day} · ${a.title}`),
+    ];
+    const body = analyticsFilteredAndSorted.map((row, i) => [
+      i + 1,
+      row.studentName || "",
+      row.studentId || "",
+      `${row.byAssignment.size}/${analyticsAssignmentList.length}`,
+      row.avgScore != null ? Math.round(row.avgScore) : "",
+      row.maxPercent != null ? Math.round(row.maxPercent) : "",
+      row.passedCount,
+      ...analyticsAssignmentList.map((a) => {
+        const sub = row.byAssignment.get(a.key);
+        if (!sub) return "Not attempted";
+        const pct = assignmentPercent(sub);
+        return pct != null ? `${Math.round(pct)}%` : "Submitted";
+      }),
+    ]);
+    downloadCsv(`assignment_analytics_${analyticsScope}_student_wise.csv`, [header, ...body]);
+  };
 
   const analyticsFilteredAndSorted = useMemo(() => {
     let list = [...analyticsStudentStats];
@@ -472,19 +535,14 @@ export default function AdminAssignmentsPage() {
     for (const sub of allAnalyticsSubmissions) {
       const key = sub.courseId || sub.courseName || "unknown";
       const name = sub.courseName || "Unknown";
-      const percent =
-        sub.autoScore ??
-        (sub.testSummary?.totalCount > 0
-          ? (sub.testSummary.partialScore != null
-            ? (sub.testSummary.partialScore / sub.testSummary.maxScore) * 100
-            : (sub.testSummary.passCount / sub.testSummary.totalCount) * 100)
-          : null);
+      const percent = assignmentPercent(sub);
       if (!byCourse.has(key)) {
         byCourse.set(key, {
           courseId: key,
           courseName: name,
           students: new Set(),
           examsAttended: 0,
+          scoredCount: 0,
           totalPercent: 0,
           maxPercent: null,
         });
@@ -493,6 +551,7 @@ export default function AdminAssignmentsPage() {
       row.students.add(sub.studentId);
       row.examsAttended += 1;
       if (percent != null && !Number.isNaN(percent)) {
+        row.scoredCount += 1;
         row.totalPercent += percent;
         row.maxPercent = row.maxPercent == null ? percent : Math.max(row.maxPercent, percent);
       }
@@ -500,7 +559,7 @@ export default function AdminAssignmentsPage() {
     return Array.from(byCourse.values()).map((row) => ({
       ...row,
       studentCount: row.students.size,
-      avgScore: row.examsAttended > 0 ? row.totalPercent / row.examsAttended : null,
+      avgScore: row.scoredCount > 0 ? row.totalPercent / row.scoredCount : null,
     }));
   }, [allAnalyticsSubmissions]);
 
@@ -511,19 +570,14 @@ export default function AdminAssignmentsPage() {
     for (const sub of allAnalyticsSubmissions) {
       const key = sub.batchId || sub.batchName || noBatchKey;
       const label = sub.batchName || "No batch";
-      const percent =
-        sub.autoScore ??
-        (sub.testSummary?.totalCount > 0
-          ? (sub.testSummary.partialScore != null
-            ? (sub.testSummary.partialScore / sub.testSummary.maxScore) * 100
-            : (sub.testSummary.passCount / sub.testSummary.totalCount) * 100)
-          : null);
+      const percent = assignmentPercent(sub);
       if (!byBatch.has(key)) {
         byBatch.set(key, {
           batchId: key === noBatchKey ? null : key,
           batchName: label,
           students: new Set(),
           examsAttended: 0,
+          scoredCount: 0,
           totalPercent: 0,
           maxPercent: null,
         });
@@ -532,6 +586,7 @@ export default function AdminAssignmentsPage() {
       row.students.add(sub.studentId);
       row.examsAttended += 1;
       if (percent != null && !Number.isNaN(percent)) {
+        row.scoredCount += 1;
         row.totalPercent += percent;
         row.maxPercent = row.maxPercent == null ? percent : Math.max(row.maxPercent, percent);
       }
@@ -539,7 +594,7 @@ export default function AdminAssignmentsPage() {
     return Array.from(byBatch.values()).map((row) => ({
       ...row,
       studentCount: row.students.size,
-      avgScore: row.examsAttended > 0 ? row.totalPercent / row.examsAttended : null,
+      avgScore: row.scoredCount > 0 ? row.totalPercent / row.scoredCount : null,
     }));
   }, [allAnalyticsSubmissions]);
 
@@ -551,63 +606,18 @@ export default function AdminAssignmentsPage() {
   const analyticsSummary = useMemo(() => {
     const totalStudents = analyticsStudentStats.length;
     const totalExams = allAnalyticsSubmissions.length;
-    const sumPercent = analyticsStudentStats.reduce(
-      (acc, s) => acc + (s.avgScore != null ? s.avgScore * (s.examsAttended || 0) : 0),
-      0
-    );
-    const overallAvg = totalExams > 0 ? sumPercent / totalExams : null;
-    const topScorer = analyticsStudentStats.reduce(
-      (best, s) => ((s.maxPercent ?? -1) > (best?.maxPercent ?? -1) ? s : best),
-      null
-    );
+    const scored = allAnalyticsSubmissions.map(assignmentPercent).filter((p) => p != null && !Number.isNaN(p));
+    const overallAvg = scored.length ? scored.reduce((a, b) => a + b, 0) / scored.length : null;
+    // Best average (not one lucky 100%); more scored attempts wins a tie.
+    const topScorer = analyticsStudentStats
+      .filter((s) => s.scoredCount > 0)
+      .reduce((best, s) => {
+        if (!best) return s;
+        if (s.avgScore !== best.avgScore) return s.avgScore > best.avgScore ? s : best;
+        return s.scoredCount > best.scoredCount ? s : best;
+      }, null);
     return { totalStudents, totalExams, overallAvg, topScorer };
-  }, [analyticsStudentStats, allAnalyticsSubmissions.length]);
-
-  const calculateMCQScore = (submission, assignment) => {
-    // Prefer autoScore if already calculated at submit time
-    if (typeof submission.autoScore === "number" && !Number.isNaN(submission.autoScore)) {
-      return submission.autoScore;
-    }
-    // Fallback: use testSummary if available (from MCQ submit flow)
-    if (submission.testSummary?.totalCount > 0) {
-      const pct = submission.testSummary.partialScore != null
-        ? (submission.testSummary.partialScore / submission.testSummary.maxScore) * 100
-        : (submission.testSummary.passCount / submission.testSummary.totalCount) * 100;
-      return Math.round(pct * 10) / 10;
-    }
-    if (assignment.type !== "mcq" || !submission.mcqAnswers) return null;
-
-    let correctAnswers = 0;
-    const totalQuestions = assignment.questions?.length || 0;
-    if (totalQuestions === 0) return 0;
-
-    assignment.questions?.forEach((question, index) => {
-      const studentAnswer = submission.mcqAnswers[index];
-
-      // Handle multiple correct answers (correctAnswers array)
-      if (Array.isArray(question.correctAnswers)) {
-        if (Array.isArray(studentAnswer)) {
-          const sortedCorrect = [...question.correctAnswers].map(Number).sort((a, b) => a - b);
-          const sortedStudent = [...studentAnswer].map(Number).sort((a, b) => a - b);
-          if (JSON.stringify(sortedCorrect) === JSON.stringify(sortedStudent)) {
-            correctAnswers++;
-          }
-        } else if (question.correctAnswers.length === 1) {
-          if (Number(studentAnswer) === Number(question.correctAnswers[0])) {
-            correctAnswers++;
-          }
-        }
-      }
-      // Handle single correct answer (correctAnswer number)
-      else if (question.correctAnswer !== undefined) {
-        if (Number(studentAnswer) === Number(question.correctAnswer)) {
-          correctAnswers++;
-        }
-      }
-    });
-
-    return totalQuestions > 0 ? (correctAnswers / totalQuestions) * 100 : 0;
-  };
+  }, [analyticsStudentStats, allAnalyticsSubmissions]);
 
   if (loading || loadingInternships) return (
     <CheckAdminAuth>
@@ -620,47 +630,6 @@ export default function AdminAssignmentsPage() {
     </CheckAdminAuth>
   );
 
-  const renderSubmissionsList = (subs, assignment) => {
-    if (!assignment) return null;
-    return (
-      <div className="divide-y divide-gray-200">
-        {subs.map((submission) => {
-          const mcqScore = assignment.type === "mcq"
-            ? calculateMCQScore(submission, assignment)
-            : null;
-          const codingScore = assignment.type === "coding"
-            ? (typeof submission.autoScore === "number"
-                ? submission.autoScore
-                : submission.testSummary?.totalCount
-                  ? Math.round((submission.testSummary.passCount / submission.testSummary.totalCount) * 100)
-                  : null)
-            : null;
-          const displayAutoScore = assignment.type === "mcq"
-            ? (mcqScore != null ? `${mcqScore.toFixed(1)}%` : "N/A")
-            : (codingScore != null ? `${codingScore}%` : "N/A");
-          return (
-            <div key={submission.id} className="p-6">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h3 className="text-lg font-medium text-gray-800">
-                    {submission.studentName}
-                  </h3>
-                  <p className="text-sm text-gray-600">
-                    Submitted: {submission.submittedAt.toLocaleString()}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm text-gray-500">Auto Score</p>
-                  <p className="text-xl font-semibold text-gray-800">{displayAutoScore}</p>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
   return (
     <CheckAdminAuth>
       <div className="min-h-screen bg-gray-50 p-6">
@@ -671,7 +640,8 @@ export default function AdminAssignmentsPage() {
           ⬅ Back
         </button>
         <div className="max-w-7xl mx-auto">
-          <div className="mb-6 flex items-center justify-between">
+          <ErrorBanner message={loadError} />
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-3xl font-bold text-gray-800">Assignment Reports</h1>
             <div className="flex gap-2">
               <button
@@ -785,20 +755,20 @@ export default function AdminAssignmentsPage() {
             )}
 
             {/* Step 3: Day Selection */}
-            {selectedCourse && selectedAssignmentType && getAvailableDays(selectedCourse, selectedAssignmentType).length > 0 && (
+            {selectedCourse && selectedAssignmentType && assignmentsOfType(selectedCourse, selectedAssignmentType).length > 0 && (
               <div className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-xl font-semibold mb-4">3. Select Day</h2>
+                <h2 className="text-xl font-semibold mb-4">3. Select Assignment</h2>
                 <select
                   id="daySelect"
                   name="daySelect"
                   value={selectedDay || ""}
-                  onChange={(e) => handleDaySelect(parseInt(e.target.value))}
+                  onChange={(e) => handleDaySelect(e.target.value)}
                   className="w-full p-3 border border-gray-300 rounded-lg focus:ring-cyan-500 focus:border-cyan-500"
                 >
-                  <option value="">Choose a day...</option>
-                  {getAvailableDays(selectedCourse, selectedAssignmentType).map((day) => (
-                    <option key={day} value={day}>
-                      Day {day}
+                  <option value="">Choose a day / assignment...</option>
+                  {assignmentsOfType(selectedCourse, selectedAssignmentType).map((a) => (
+                    <option key={a.id} value={a.id}>
+                      Day {a.day || 1} — {a.title || a.id}
                     </option>
                   ))}
                 </select>
@@ -807,25 +777,20 @@ export default function AdminAssignmentsPage() {
           </div>
 
           {/* Submissions List */}
+          <ErrorBanner message={submissionsError} />
           {selectedAssignment && (
-            <div className="bg-white rounded-lg shadow">
-              <div className="p-6 border-b">
-                <h2 className="text-2xl font-semibold text-gray-800">
-                  Submissions for: {selectedAssignment.title}
-                </h2>
-                <p className="text-gray-600 mt-2">
-                  Course: {selectedCourse.title} | Type: {selectedAssignment.type.toUpperCase()} | Day: {selectedAssignment.day || 1}
-                </p>
+            loadingSubmissions ? (
+              <div className="flex justify-center rounded-xl border border-gray-200 bg-white py-12">
+                <div className="h-10 w-10 animate-spin rounded-full border-b-2 border-cyan-600" />
               </div>
-
-              {submissions.length === 0 ? (
-                <div className="p-8 text-center text-gray-500">
-                  No submissions yet for this assignment.
-                </div>
-              ) : (
-                renderSubmissionsList(submissions, selectedAssignment)
-              )}
-            </div>
+            ) : (
+              <AssignmentSubmissionsReport
+                key={selectedAssignment.id}
+                submissions={submissions}
+                assignment={selectedAssignment}
+                contextLabel={selectedCourse?.title}
+              />
+            )
           )}
             </>
           )}
@@ -920,21 +885,18 @@ export default function AdminAssignmentsPage() {
 
                     {selectedInternshipCourse &&
                       internshipAssignmentType &&
-                      getAvailableDays(selectedInternshipCourse, internshipAssignmentType).length > 0 && (
+                      assignmentsOfType(selectedInternshipCourse, internshipAssignmentType).length > 0 && (
                       <div className="bg-white rounded-lg shadow p-6 lg:col-span-1">
-                        <h2 className="text-xl font-semibold mb-4">4. Select Day</h2>
+                        <h2 className="text-xl font-semibold mb-4">4. Select Assignment</h2>
                         <select
                           value={internshipDay || ""}
-                          onChange={(e) => handleInternshipDaySelect(parseInt(e.target.value))}
+                          onChange={(e) => handleInternshipDaySelect(e.target.value)}
                           className="w-full p-3 border border-gray-300 rounded-lg focus:ring-cyan-500 focus:border-cyan-500"
                         >
-                          <option value="">Choose a day...</option>
-                          {getAvailableDays(
-                            selectedInternshipCourse,
-                            internshipAssignmentType
-                          ).map((day) => (
-                            <option key={day} value={day}>
-                              Day {day}
+                          <option value="">Choose a day / assignment...</option>
+                          {assignmentsOfType(selectedInternshipCourse, internshipAssignmentType).map((a) => (
+                            <option key={a.id} value={a.id}>
+                              Day {a.day || 1} — {a.title || a.id}
                             </option>
                           ))}
                         </select>
@@ -942,31 +904,20 @@ export default function AdminAssignmentsPage() {
                     )}
                   </div>
 
+                  <ErrorBanner message={submissionsError} />
                   {selectedInternshipAssignment && (
-                    <div className="bg-white rounded-lg shadow">
-                      <div className="p-6 border-b">
-                        <h2 className="text-2xl font-semibold text-gray-800">
-                          Submissions for: {selectedInternshipAssignment.title}
-                        </h2>
-                        <p className="text-gray-600 mt-2">
-                          Internship: {selectedInternship?.name || selectedInternship?.title} | Course:{" "}
-                          {selectedInternshipCourse?.title} | Type:{" "}
-                          {selectedInternshipAssignment.type?.toUpperCase()} | Day:{" "}
-                          {selectedInternshipAssignment.day || 1}
-                        </p>
+                    loadingSubmissions ? (
+                      <div className="flex justify-center rounded-xl border border-gray-200 bg-white py-12">
+                        <div className="h-10 w-10 animate-spin rounded-full border-b-2 border-cyan-600" />
                       </div>
-
-                      {internshipSubmissions.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
-                          No submissions yet for this assignment.
-                        </div>
-                      ) : (
-                        renderSubmissionsList(
-                          internshipSubmissions,
-                          selectedInternshipAssignment
-                        )
-                      )}
-                    </div>
+                    ) : (
+                      <AssignmentSubmissionsReport
+                        key={selectedInternshipAssignment.id}
+                        submissions={internshipSubmissions}
+                        assignment={selectedInternshipAssignment}
+                        contextLabel={`${selectedInternship?.name || selectedInternship?.title || "Internship"} · ${selectedInternshipCourse?.title || ""}`}
+                      />
+                    )
                   )}
                 </>
               )}
@@ -1081,6 +1032,13 @@ export default function AdminAssignmentsPage() {
                 )}
               </div>
 
+              <ErrorBanner message={analyticsError} />
+              {analyticsFailedCount > 0 && !analyticsError && (
+                <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  Submissions for {analyticsFailedCount} assignment(s) could not be loaded. The analytics below exclude them — click Refresh to retry.
+                </div>
+              )}
+
               {/* View mode toggle when we have data */}
               {((analyticsScope === "progress" && (analyticsCourse || courses.length > 0)) || (analyticsScope === "internship" && analyticsInternship && (analyticsInternshipCourse || internshipCoursesForAnalytics.length > 0))) && (
                 <div className="flex flex-wrap gap-2 mb-4">
@@ -1117,6 +1075,27 @@ export default function AdminAssignmentsPage() {
                       Batch
                     </button>
                   )}
+                  <div className="ml-auto flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsReloadKey((k) => k + 1)}
+                      disabled={loadingAnalytics}
+                      className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-4 w-4 ${loadingAnalytics ? "animate-spin" : ""}`} />
+                      Refresh
+                    </button>
+                    {analyticsViewMode === "student" && analyticsFilteredAndSorted.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={exportAnalyticsCsv}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                      >
+                        <Download className="h-4 w-4" />
+                        Student-wise CSV
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1265,9 +1244,9 @@ export default function AdminAssignmentsPage() {
                         <p className="text-lg font-bold text-gray-800 truncate" title={analyticsSummary.topScorer?.studentName}>
                           {analyticsSummary.topScorer?.studentName || "—"}
                         </p>
-                        {analyticsSummary.topScorer?.maxPercent != null && (
+                        {analyticsSummary.topScorer?.avgScore != null && (
                           <p className="text-sm text-amber-700 font-medium">
-                            {Math.round(analyticsSummary.topScorer.maxPercent)}%
+                            Avg {Math.round(analyticsSummary.topScorer.avgScore)}% · {analyticsSummary.topScorer.scoredCount} attempt(s)
                           </p>
                         )}
                       </div>
@@ -1306,7 +1285,7 @@ export default function AdminAssignmentsPage() {
                             <th className="px-4 py-3 font-semibold">#</th>
                             <th className="px-4 py-3 font-semibold">Student</th>
                             <th className="px-4 py-3 font-semibold text-center">Subjects</th>
-                            <th className="px-4 py-3 font-semibold text-center">Exams</th>
+                            <th className="px-4 py-3 font-semibold text-center">Assignments</th>
                             <th className="px-4 py-3 font-semibold text-center">Avg score</th>
                             <th className="px-4 py-3 font-semibold text-center">Highest</th>
                             <th className="px-4 py-3 font-semibold">Last attempt</th>
@@ -1316,17 +1295,31 @@ export default function AdminAssignmentsPage() {
                         <tbody>
                           {analyticsFilteredAndSorted.map((row, i) => (
                             <React.Fragment key={row.studentId}>
-                              <tr className="border-t border-gray-100 hover:bg-cyan-50/30 transition-colors">
+                              <tr
+                                onClick={() => setExpandedStudentId(expandedStudentId === row.studentId ? null : row.studentId)}
+                                className={`border-t border-gray-100 cursor-pointer hover:bg-cyan-50/30 transition-colors ${
+                                  expandedStudentId === row.studentId ? "bg-cyan-50/60" : ""
+                                }`}
+                              >
                                 <td className="px-4 py-3 text-gray-500 tabular-nums font-medium">{i + 1}</td>
-                                <td className="px-4 py-3 font-medium text-gray-800">{row.studentName || row.studentId || "—"}</td>
+                                <td className="px-4 py-3 font-medium text-gray-800">
+                                  {row.studentName || row.studentId || "—"}
+                                  <span className="block text-xs font-normal text-gray-500">
+                                    {row.passedCount}/{row.scoredCount} passed (≥{ASSIGNMENT_PASS_PERCENT}%)
+                                  </span>
+                                </td>
                                 <td className="px-4 py-3 text-center">
                                   <span className="inline-flex items-center justify-center min-w-[3rem] px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 font-semibold text-sm" title={`${row.subjectsAttempted ?? 0} of ${analyticsTotalSubjects} subjects attempted`}>
                                     {(row.subjectsAttempted ?? 0)}/{analyticsTotalSubjects}
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
-                                  <span className="inline-flex items-center justify-center min-w-[2.5rem] px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 font-semibold text-sm">
-                                    {row.examsAttended}
+                                  <span
+                                    className="inline-flex items-center justify-center min-w-[2.5rem] px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 font-semibold text-sm tabular-nums"
+                                    title={`${row.byAssignment.size} of ${analyticsAssignmentList.length} assignments attempted`}
+                                  >
+                                    {row.byAssignment.size}
+                                    <span className="font-normal text-slate-400">/{analyticsAssignmentList.length}</span>
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
@@ -1357,21 +1350,74 @@ export default function AdminAssignmentsPage() {
                                     : "—"}
                                 </td>
                                 <td className="px-4 py-3">
-                                  {row.subjectScores?.length > 0 && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setExpandedStudentId(expandedStudentId === row.studentId ? null : row.studentId)}
-                                      className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-600 hover:text-slate-800 text-xs font-medium"
-                                      title="View subject-wise scores"
-                                    >
-                                      {expandedStudentId === row.studentId ? "−" : "+"}
-                                    </button>
-                                  )}
+                                  <button
+                                    type="button"
+                                    aria-expanded={expandedStudentId === row.studentId}
+                                    className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-600"
+                                    title="View assignment-wise scores"
+                                  >
+                                    {expandedStudentId === row.studentId ? (
+                                      <ChevronDown className="h-4 w-4" />
+                                    ) : (
+                                      <ChevronRight className="h-4 w-4" />
+                                    )}
+                                  </button>
                                 </td>
                               </tr>
-                              {expandedStudentId === row.studentId && row.subjectScores?.length > 0 && (
+                              {expandedStudentId === row.studentId && (
                                 <tr key={`${row.studentId}-exp`} className="bg-slate-50/80">
                                   <td colSpan={8} className="px-4 py-3">
+                                    <div className="mb-3 overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                                      <table className="w-full text-left text-sm">
+                                        <thead>
+                                          <tr className="bg-gray-50 text-gray-600">
+                                            <th className="px-3 py-2 font-semibold">Course</th>
+                                            <th className="px-3 py-2 font-semibold">Assignment</th>
+                                            <th className="px-3 py-2 font-semibold text-center">Type</th>
+                                            <th className="px-3 py-2 font-semibold text-center">Status</th>
+                                            <th className="px-3 py-2 font-semibold text-center">Score</th>
+                                            <th className="px-3 py-2 font-semibold">Submitted</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {analyticsAssignmentList.map((a) => {
+                                            const sub = row.byAssignment.get(a.key);
+                                            const pct = sub ? assignmentPercent(sub) : null;
+                                            const when = sub ? toDate(sub.submittedAt) : null;
+                                            return (
+                                              <tr key={a.key} className="border-t border-gray-100">
+                                                <td className="px-3 py-2 text-gray-600">{a.courseName}</td>
+                                                <td className="px-3 py-2 font-medium text-gray-800">
+                                                  Day {a.day} — {a.title}
+                                                </td>
+                                                <td className="px-3 py-2 text-center text-xs uppercase text-gray-500">{a.type || "—"}</td>
+                                                <td className="px-3 py-2 text-center">
+                                                  {!sub ? (
+                                                    <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">Not attempted</span>
+                                                  ) : pct == null ? (
+                                                    <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">Submitted</span>
+                                                  ) : pct >= ASSIGNMENT_PASS_PERCENT ? (
+                                                    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">Pass</span>
+                                                  ) : (
+                                                    <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                                      Below {ASSIGNMENT_PASS_PERCENT}%
+                                                    </span>
+                                                  )}
+                                                </td>
+                                                <td className="px-3 py-2 text-center font-semibold tabular-nums text-gray-800">
+                                                  {pct != null ? `${Math.round(pct)}%` : "—"}
+                                                </td>
+                                                <td className="px-3 py-2 text-gray-500">
+                                                  {when
+                                                    ? when.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                                                    : "—"}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
                                     <div className="flex flex-wrap gap-3">
                                       {row.subjectScores.map((s) => (
                                         <div key={s.courseId} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white border border-slate-200 shadow-sm">

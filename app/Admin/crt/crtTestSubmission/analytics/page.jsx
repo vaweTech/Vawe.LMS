@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { Fragment, useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { db, firestoreHelpers } from "../../../../../lib/firebase";
 import { useAdminAccess } from "../../../AdminAccessContext";
@@ -13,10 +13,14 @@ import {
   DocumentChartBarIcon,
   ArrowPathIcon,
   FunnelIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ArrowDownTrayIcon,
 } from "@heroicons/react/24/solid";
 import { tenantSegments } from "@/lib/tenantPath";
+import { csvEscape } from "@/lib/crtPlacementData";
 import {
-  fetchAllSubmissionsForCrt,
+  fetchAllSubmissionsForCrtWithStatus,
   fetchAllTestOptions,
   fetchBatchRoster,
   partitionAttendance,
@@ -35,6 +39,27 @@ const SORT_OPTIONS = [
   { value: "highestDesc", label: "Highest score (high first)" },
   { value: "highestAsc", label: "Highest score (low first)" },
 ];
+
+function friendlyLoadError(e) {
+  if (e?.code === "permission-denied") {
+    return "Permission denied while reading CRT data. Check Firestore rules for this admin account.";
+  }
+  if (e?.code === "unavailable" || /network|offline/i.test(String(e?.message || ""))) {
+    return "Could not reach Firebase. Check your internet connection and click Refresh.";
+  }
+  return e?.message || "Could not load CRT data.";
+}
+
+/** CRT exams first, then day tests in day order (Day 2 before Day 10), then subject. */
+function compareTests(a, b) {
+  const rank = (t) => (t.sourceType === "crt_exam" ? 0 : 1);
+  return (
+    rank(a) - rank(b) ||
+    (Number(a.day) || 0) - (Number(b.day) || 0) ||
+    String(a.courseTitle || "").localeCompare(String(b.courseTitle || "")) ||
+    String(a.testName || a.label || "").localeCompare(String(b.testName || b.label || ""))
+  );
+}
 
 function ScoreBadge({ value }) {
   if (value == null || value === "") return <span className="text-gray-400">—</span>;
@@ -76,14 +101,26 @@ export default function CRTTestAnalyticsPage() {
   const [detailModal, setDetailModal] = useState(null);
   const [cacheHint, setCacheHint] = useState("");
 
+  const [loadError, setLoadError] = useState("");
+  const [failedTests, setFailedTests] = useState([]);
+  const [viewTab, setViewTab] = useState("student");
+  const [expandedKey, setExpandedKey] = useState(null);
+
   const fetchCrts = useCallback(async () => {
-    const snap = await firestoreHelpers.getDocs(
-      firestoreHelpers.collection(db, ...tenantSegments(collegeSubdomain, "crt"))
-    );
-    const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    setCrts(list);
-    if (list.length > 0 && !selectedCrtId) setSelectedCrtId(list[0].id);
-  }, [selectedCrtId, collegeSubdomain]);
+    try {
+      const snap = await firestoreHelpers.getDocs(
+        firestoreHelpers.collection(db, ...tenantSegments(collegeSubdomain, "crt"))
+      );
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setCrts(list);
+      setSelectedCrtId((current) =>
+        current && list.some((c) => c.id === current) ? current : list[0]?.id || ""
+      );
+    } catch (e) {
+      console.error(e);
+      setLoadError(friendlyLoadError(e));
+    }
+  }, [collegeSubdomain]);
 
   useEffect(() => {
     if (!user) return;
@@ -102,10 +139,12 @@ export default function CRTTestAnalyticsPage() {
         invalidateCrtProgramCache(collegeSubdomain, crtId);
       }
       setLoadingData(true);
+      setLoadError("");
+      setFailedTests([]);
       try {
         const cacheOptions = { forceRefresh };
-        const [submissions, roster, tests] = await Promise.all([
-          fetchAllSubmissionsForCrt(
+        const [submissionResult, roster, tests] = await Promise.all([
+          fetchAllSubmissionsForCrtWithStatus(
             db,
             firestoreHelpers,
             collegeSubdomain,
@@ -127,16 +166,19 @@ export default function CRTTestAnalyticsPage() {
             cacheOptions
           ),
         ]);
+        const submissions = submissionResult.submissions;
         setAllSubmissions(submissions);
+        setFailedTests(submissionResult.failedTests);
         setBatchRoster(roster);
         setTestOptions(tests);
         setCacheHint(
-          forceRefresh
-            ? "Loaded fresh from Firebase"
-            : "Session cache used (5 min TTL) — click Refresh for latest"
+          submissionResult.fromCache
+            ? `Session cache used (5 min TTL) — ${submissions.length} submission(s). Click Refresh for latest.`
+            : `Loaded fresh from Firebase — ${submissions.length} submission(s).`
         );
       } catch (e) {
         console.error(e);
+        setLoadError(friendlyLoadError(e));
         setAllSubmissions([]);
         setBatchRoster([]);
         setTestOptions([]);
@@ -179,9 +221,11 @@ export default function CRTTestAnalyticsPage() {
   const filteredSubmissions = useMemo(() => {
     if (selectedBatchKey === "all") return allSubmissions;
     return allSubmissions.filter(
-      (sub) => (sub.batchId || NO_BATCH_KEY) === selectedBatchKey
+      (sub) =>
+        (sub.batchId || NO_BATCH_KEY) === selectedBatchKey ||
+        filteredRoster.some((s) => submissionMatchesStudent(sub, s))
     );
-  }, [allSubmissions, selectedBatchKey]);
+  }, [allSubmissions, selectedBatchKey, filteredRoster]);
 
   const studentStats = useMemo(() => {
     const rows = new Map();
@@ -196,6 +240,7 @@ export default function CRTTestAnalyticsPage() {
         batchName: student.batchName || null,
         batchId: student.batchId || null,
         examsAttended: 0,
+        scoredCount: 0,
         totalPercent: 0,
         maxPercent: null,
         lastSubmittedAt: null,
@@ -223,6 +268,7 @@ export default function CRTTestAnalyticsPage() {
         matchedSubIds.add(sub.id);
         row.examsAttended += 1;
         if (percent != null && !Number.isNaN(percent)) {
+          row.scoredCount += 1;
           row.totalPercent += percent;
           row.maxPercent =
             row.maxPercent == null ? percent : Math.max(row.maxPercent, percent);
@@ -242,34 +288,48 @@ export default function CRTTestAnalyticsPage() {
     for (const sub of filteredSubmissions) {
       if (matchedSubIds.has(sub.id)) continue;
       const uid = sub.userId || sub.studentId || `orphan-${sub.id}`;
-      rows.set(`orphan:${sub.id}`, {
-        key: `orphan:${sub.id}`,
-        userId: uid,
-        userName: sub.userName || uid,
-        phone: sub.phone || "",
-        regdNo: sub.regdNo || "",
-        batchName: sub.batchName || null,
-        batchId: sub.batchId || null,
-        examsAttended: 1,
-        totalPercent: submissionPercent(sub) ?? 0,
-        maxPercent: submissionPercent(sub),
-        lastSubmittedAt: sub.submittedAt
-          ? new Date(sub.submittedAt).getTime()
-          : null,
-        submissions: [sub],
-        testNames: new Set([
-          sub.testLabel ||
-            (sub.sourceType === "day_test" && sub.day
-              ? `Day ${sub.day}: ${sub.testName}`
-              : sub.testName),
-        ].filter(Boolean)),
-      });
+      const key = `orphan:${uid}`;
+      if (!rows.has(key)) {
+        rows.set(key, {
+          key,
+          userId: uid,
+          userName: sub.userName || uid,
+          phone: sub.phone || sub.submittedPhone || "",
+          regdNo: sub.regdNo || "",
+          batchName: sub.batchName || "Not in any batch",
+          batchId: sub.batchId || null,
+          examsAttended: 0,
+          scoredCount: 0,
+          totalPercent: 0,
+          maxPercent: null,
+          lastSubmittedAt: null,
+          submissions: [],
+          testNames: new Set(),
+          notInRoster: true,
+        });
+      }
+      const row = rows.get(key);
+      const percent = submissionPercent(sub);
+      row.examsAttended += 1;
+      if (percent != null) {
+        row.scoredCount += 1;
+        row.totalPercent += percent;
+        row.maxPercent = row.maxPercent == null ? percent : Math.max(row.maxPercent, percent);
+      }
+      if (sub.submittedAt) {
+        const t = new Date(sub.submittedAt).getTime();
+        if (!row.lastSubmittedAt || t > row.lastSubmittedAt) row.lastSubmittedAt = t;
+      }
+      const label =
+        sub.testLabel ||
+        (sub.sourceType === "day_test" && sub.day ? `Day ${sub.day}: ${sub.testName}` : sub.testName);
+      if (label) row.testNames.add(label);
+      row.submissions.push(sub);
     }
 
     return Array.from(rows.values()).map((row) => ({
       ...row,
-      avgScore:
-        row.examsAttended > 0 ? row.totalPercent / row.examsAttended : null,
+      avgScore: row.scoredCount > 0 ? row.totalPercent / row.scoredCount : null,
       testNames: Array.from(row.testNames).sort(),
     }));
   }, [filteredSubmissions, filteredRoster]);
@@ -306,6 +366,9 @@ export default function CRTTestAnalyticsPage() {
           testKey: test.key,
           testName: test.label,
           sourceType: test.sourceType,
+          day: test.day,
+          courseTitle: test.courseTitle,
+          type: test.type,
           attempts: testSubs.length,
           attendedCount: attended.length,
           notAttendedCount: notAttended.length,
@@ -315,7 +378,7 @@ export default function CRTTestAnalyticsPage() {
             scoredCount > 0 ? Math.round(totalPercent / scoredCount) : null,
         };
       })
-      .sort((a, b) => a.testName.localeCompare(b.testName));
+      .sort(compareTests);
   }, [testOptions, filteredSubmissions, filteredRoster]);
 
   const filteredAndSorted = useMemo(() => {
@@ -369,17 +432,20 @@ export default function CRTTestAnalyticsPage() {
     const notAttendedTotal = studentStats.filter(
       (s) => s.examsAttended === 0
     ).length;
-    const sumPercent = studentStats.reduce(
-      (acc, s) =>
-        acc + (s.avgScore != null ? s.avgScore * (s.examsAttended || 0) : 0),
-      0
-    );
-    const overallAvg = totalExams > 0 ? sumPercent / totalExams : null;
-    const topScorer = studentStats.reduce(
-      (best, s) =>
-        (s.maxPercent ?? -1) > (best?.maxPercent ?? -1) ? s : best,
-      null
-    );
+    const scored = filteredSubmissions
+      .map(submissionPercent)
+      .filter((p) => p != null && !Number.isNaN(p));
+    const overallAvg = scored.length
+      ? scored.reduce((a, b) => a + b, 0) / scored.length
+      : null;
+    // Best average (not one lucky 100%); more scored tests wins a tie.
+    const topScorer = studentStats
+      .filter((s) => s.scoredCount > 0)
+      .reduce((best, s) => {
+        if (!best) return s;
+        if (s.avgScore !== best.avgScore) return s.avgScore > best.avgScore ? s : best;
+        return s.scoredCount > best.scoredCount ? s : best;
+      }, null);
     return {
       totalStudents,
       totalExams,
@@ -387,12 +453,69 @@ export default function CRTTestAnalyticsPage() {
       topScorer,
       notAttendedTotal,
     };
-  }, [studentStats, filteredSubmissions.length]);
+  }, [studentStats, filteredSubmissions]);
 
   const selectedCrt = useMemo(
     () => crts.find((c) => c.id === selectedCrtId) || null,
     [crts, selectedCrtId]
   );
+
+  /** Latest submission per test for one student, in the same order as the test list. */
+  const testBreakdownFor = useCallback(
+    (row) => {
+      const latestByTest = new Map();
+      for (const sub of row.submissions) {
+        const prev = latestByTest.get(sub.testKey);
+        const t = sub.submittedAt ? new Date(sub.submittedAt).getTime() : 0;
+        const pt = prev?.submittedAt ? new Date(prev.submittedAt).getTime() : -1;
+        if (!prev || t > pt) latestByTest.set(sub.testKey, sub);
+      }
+      return testSummaryByName.map((test) => {
+        const sub = latestByTest.get(test.testKey) || null;
+        const attempts = row.submissions.filter((s) => s.testKey === test.testKey).length;
+        return { test, sub, attempts, percent: sub ? submissionPercent(sub) : null };
+      });
+    },
+    [testSummaryByName]
+  );
+
+  const exportStudentCsv = useCallback(() => {
+    const header = [
+      "#",
+      "Student",
+      "Mobile",
+      "Regd No",
+      "Batch",
+      "Tests attended",
+      "Avg %",
+      "Highest %",
+      ...testSummaryByName.map((t) => t.testName),
+    ];
+    const lines = filteredAndSorted.map((row, i) => {
+      const cells = testBreakdownFor(row).map(({ sub, percent }) =>
+        !sub ? "Not attended" : percent != null ? `${Math.round(percent)}%` : "Submitted"
+      );
+      return [
+        i + 1,
+        row.userName || row.userId || "",
+        row.phone || "",
+        row.regdNo || "",
+        row.batchName || "",
+        `${new Set(row.submissions.map((s) => s.testKey)).size}/${testSummaryByName.length}`,
+        row.avgScore != null ? Math.round(row.avgScore) : "",
+        row.maxPercent != null ? Math.round(row.maxPercent) : "",
+        ...cells,
+      ];
+    });
+    const csv = [header, ...lines].map((r) => r.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(selectedCrt?.name || "crt").replace(/[^\w-]+/g, "_")}_student_wise.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [filteredAndSorted, testBreakdownFor, testSummaryByName, selectedCrt]);
 
   if (loading) {
     return (
@@ -501,6 +624,28 @@ export default function CRTTestAnalyticsPage() {
           <p className="text-xs text-gray-500 mb-4">{cacheHint}</p>
         ) : null}
 
+        {loadError ? (
+          <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            {loadError}
+          </div>
+        ) : null}
+
+        {failedTests.length > 0 ? (
+          <div role="alert" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p className="font-semibold">
+              Results for {failedTests.length} test(s) could not be loaded. Analytics below exclude them.
+            </p>
+            <ul className="mt-1 list-disc pl-5 text-amber-800">
+              {failedTests.slice(0, 5).map((t) => (
+                <li key={t.label}>
+                  {t.label}
+                  {t.code === "permission-denied" ? " — permission denied" : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         {selectedCrt && (
           <div className="mb-6 p-3 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-wrap items-center gap-4 text-sm">
             <span className="font-semibold text-gray-800">
@@ -596,9 +741,9 @@ export default function CRTTestAnalyticsPage() {
                     >
                       {summary.topScorer?.userName || "—"}
                     </p>
-                    {summary.topScorer?.maxPercent != null && (
+                    {summary.topScorer?.avgScore != null && (
                       <p className="text-sm text-amber-700 font-medium">
-                        {Math.round(summary.topScorer.maxPercent)}%
+                        Avg {Math.round(summary.topScorer.avgScore)}% · {summary.topScorer.scoredCount} test(s)
                       </p>
                     )}
                   </div>
@@ -606,7 +751,41 @@ export default function CRTTestAnalyticsPage() {
               </div>
             </div>
 
-            {testSummaryByName.length > 0 && (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div role="tablist" className="inline-flex rounded-lg border border-gray-200 bg-white p-1 shadow-sm">
+                {[
+                  { id: "student", label: `By student (${summary.totalStudents})` },
+                  { id: "test", label: `By test (${testSummaryByName.length})` },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={viewTab === tab.id}
+                    onClick={() => setViewTab(tab.id)}
+                    className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                      viewTab === tab.id
+                        ? "bg-cyan-600 text-white shadow"
+                        : "text-gray-600 hover:bg-gray-100"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              {viewTab === "student" && filteredAndSorted.length > 0 && (
+                <button
+                  type="button"
+                  onClick={exportStudentCsv}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  <ArrowDownTrayIcon className="w-4 h-4" />
+                  Download student-wise CSV
+                </button>
+              )}
+            </div>
+
+            {viewTab === "test" && testSummaryByName.length > 0 && (
               <div className="mb-8 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-4 py-3 border-b border-gray-200 bg-gradient-to-r from-violet-50 to-cyan-50">
                   <h2 className="font-semibold text-gray-800">
@@ -669,6 +848,8 @@ export default function CRTTestAnalyticsPage() {
                                 <span className="font-semibold text-gray-800">
                                   {row.avgPercent}%
                                 </span>
+                              ) : row.attempts > 0 ? (
+                                <span className="text-xs text-gray-500">Not auto-scored</span>
                               ) : (
                                 "—"
                               )}
@@ -721,6 +902,7 @@ export default function CRTTestAnalyticsPage() {
               </div>
             )}
 
+            {viewTab === "student" && (
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               <div className="p-4 border-b border-gray-200 flex flex-wrap items-center gap-4">
                 {summary.notAttendedTotal > 0 && (
@@ -808,20 +990,38 @@ export default function CRTTestAnalyticsPage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredAndSorted.map((row, i) => (
+                      filteredAndSorted.map((row, i) => {
+                        const rowKey = row.key || row.userId;
+                        const isOpen = expandedKey === rowKey;
+                        return (
+                        <Fragment key={rowKey}>
                         <tr
-                          key={row.key || row.userId}
-                          className={`border-t border-gray-100 hover:bg-cyan-50/30 transition-colors ${
-                            row.examsAttended === 0 ? "bg-red-50/20" : ""
+                          onClick={() => setExpandedKey(isOpen ? null : rowKey)}
+                          className={`border-t border-gray-100 cursor-pointer hover:bg-cyan-50/30 transition-colors ${
+                            isOpen ? "bg-cyan-50/50" : row.examsAttended === 0 ? "bg-red-50/20" : ""
                           }`}
                         >
                           <td className="px-4 py-3 text-gray-500 tabular-nums font-medium">
-                            {i + 1}
+                            <span className="inline-flex items-center gap-1">
+                              {isOpen ? (
+                                <ChevronDownIcon className="w-4 h-4 text-cyan-600" />
+                              ) : (
+                                <ChevronRightIcon className="w-4 h-4 text-gray-400" />
+                              )}
+                              {i + 1}
+                            </span>
                           </td>
                           <td className="px-4 py-3">
-                            <span className="font-medium text-gray-800">
+                            <button
+                              type="button"
+                              aria-expanded={isOpen}
+                              className="font-medium text-gray-800 text-left hover:text-cyan-700"
+                            >
                               {row.userName || row.userId || "—"}
-                            </span>
+                            </button>
+                            {row.regdNo ? (
+                              <span className="block text-xs text-gray-500">{row.regdNo}</span>
+                            ) : null}
                             {row.examsAttended === 0 && (
                               <span className="ml-2 text-[10px] font-medium text-red-700 bg-red-100 px-1.5 py-0.5 rounded">
                                 Not attended
@@ -835,8 +1035,9 @@ export default function CRTTestAnalyticsPage() {
                             {row.batchName || "—"}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <span className="inline-flex items-center justify-center min-w-[2.5rem] px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 font-semibold text-sm">
-                              {row.examsAttended}
+                            <span className="inline-flex items-center justify-center min-w-[2.5rem] px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 font-semibold text-sm tabular-nums">
+                              {new Set(row.submissions.map((s) => s.testKey)).size}
+                              <span className="text-slate-400 font-normal">/{testSummaryByName.length}</span>
                             </span>
                           </td>
                           <td className="px-4 py-3 text-xs text-gray-600 max-w-[240px]">
@@ -865,12 +1066,101 @@ export default function CRTTestAnalyticsPage() {
                               : "—"}
                           </td>
                         </tr>
-                      ))
+                        {isOpen && (
+                          <tr className="bg-slate-50/70">
+                            <td colSpan={9} className="px-4 pb-4 pt-1">
+                              <div className="rounded-lg border border-gray-200 bg-white overflow-x-auto">
+                                <table className="w-full text-left text-sm">
+                                  <thead>
+                                    <tr className="bg-gray-50 text-gray-600">
+                                      <th className="px-3 py-2 font-semibold">Test</th>
+                                      <th className="px-3 py-2 font-semibold text-center">Type</th>
+                                      <th className="px-3 py-2 font-semibold text-center">Status</th>
+                                      <th className="px-3 py-2 font-semibold text-center">Score</th>
+                                      <th className="px-3 py-2 font-semibold text-center">Attempts</th>
+                                      <th className="px-3 py-2 font-semibold">Submitted</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {testBreakdownFor(row).map(({ test, sub, attempts, percent }) => (
+                                      <tr key={test.testKey} className="border-t border-gray-100">
+                                        <td className="px-3 py-2 font-medium text-gray-800">{test.testName}</td>
+                                        <td className="px-3 py-2 text-center">
+                                          <span
+                                            className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                              test.sourceType === "day_test"
+                                                ? "bg-violet-100 text-violet-800"
+                                                : "bg-cyan-100 text-cyan-800"
+                                            }`}
+                                          >
+                                            {test.sourceType === "day_test" ? "Day test" : "CRT exam"}
+                                          </span>
+                                        </td>
+                                        <td className="px-3 py-2 text-center">
+                                          {!sub ? (
+                                            <span className="text-xs font-medium text-red-700 bg-red-100 px-2 py-0.5 rounded">
+                                              Not attended
+                                            </span>
+                                          ) : percent == null ? (
+                                            <span className="text-xs font-medium text-slate-700 bg-slate-100 px-2 py-0.5 rounded">
+                                              Submitted
+                                            </span>
+                                          ) : percent >= 40 ? (
+                                            <span className="text-xs font-medium text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">
+                                              Pass
+                                            </span>
+                                          ) : (
+                                            <span className="text-xs font-medium text-amber-800 bg-amber-100 px-2 py-0.5 rounded">
+                                              Below 40%
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="px-3 py-2 text-center">
+                                          {!sub ? (
+                                            "—"
+                                          ) : percent != null ? (
+                                            <span className="inline-flex flex-col items-center">
+                                              <ScoreBadge value={percent} />
+                                              {sub.score != null && sub.total != null ? (
+                                                <span className="text-[11px] text-gray-500 mt-0.5">
+                                                  {sub.score}/{sub.total}
+                                                </span>
+                                              ) : null}
+                                            </span>
+                                          ) : (
+                                            <span className="text-xs text-gray-500">Not auto-scored</span>
+                                          )}
+                                        </td>
+                                        <td className="px-3 py-2 text-center tabular-nums text-gray-700">
+                                          {attempts || "—"}
+                                        </td>
+                                        <td className="px-3 py-2 text-gray-500">
+                                          {sub?.submittedAt
+                                            ? new Date(sub.submittedAt).toLocaleString(undefined, {
+                                                day: "numeric",
+                                                month: "short",
+                                                hour: "2-digit",
+                                                minute: "2-digit",
+                                              })
+                                            : "—"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
               </div>
             </div>
+            )}
           </>
         )}
 

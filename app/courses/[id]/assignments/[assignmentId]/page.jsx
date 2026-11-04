@@ -27,7 +27,15 @@
     normalizeUnlockedChapterIds,
   } from "../../../../../lib/internshipChapterAccess";
 
-  const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
+  const loadMonaco = () => import("@monaco-editor/react");
+  const MonacoEditor = dynamic(loadMonaco, {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full min-h-[300px] w-full items-center justify-center rounded-md bg-slate-100 text-sm text-slate-500">
+        Loading code editor…
+      </div>
+    ),
+  });
 
   // Stateless helpers
   const getDefaultStarter = (language) => {
@@ -210,7 +218,31 @@
       try {
         let foundCourseId = null;
 
-        // Fetch student data and user role first (needed for both query-param and slug paths)
+        // Start every read that doesn't depend on the user's role right away, so they run in parallel.
+        const copiedReads = queryCourseId
+          ? Promise.all([
+              getDoc(doc(mcqDb, "copiedcourses", queryCourseId, "assignments", assignmentId)),
+              queryInternshipId
+                ? getDoc(doc(db, "internships", queryInternshipId, "courses", queryCourseId)).catch(() => null)
+                : Promise.resolve(null),
+              getDocs(
+                query(
+                  collection(mcqDb, "copiedcourses", queryCourseId, "assignments", assignmentId, "submissions"),
+                  where("studentId", "==", user.uid)
+                )
+              ),
+              queryInternshipId
+                ? getDocs(
+                    query(
+                      collection(db, "internships", queryInternshipId, "courses", queryCourseId, "chapters"),
+                      orderBy("order", "asc")
+                    )
+                  ).catch(() => null)
+                : Promise.resolve(null),
+            ])
+          : null;
+        const coursesRead = queryCourseId ? null : getDocs(collection(db, "courses"));
+
         const [studentDataResult, userRoleResult] = await Promise.all([
           (async () => {
             const directRef = doc(db, "students", user.uid);
@@ -248,7 +280,7 @@
 
         // When opened from internship course page: load assignment from that course copy and grant access by chapter unlock
         if (queryCourseId) {
-          const assignmentSnap = await getDoc(doc(mcqDb, "copiedcourses", queryCourseId, "assignments", assignmentId));
+          const [assignmentSnap, courseSnap, submissionQuerySnap, chapterSnap] = await copiedReads;
           if (!assignmentSnap.exists()) {
             if (queryInternshipId) router.push(`/internships/${queryInternshipId}/courses/${queryCourseId}`);
             else router.push(`/courses`);
@@ -259,29 +291,12 @@
           setIsCopiedCourse(true);
           setCourseId(queryCourseId);
 
-          let courseData = { id: queryCourseId, title: "Course" };
-          if (queryInternshipId) {
-            const courseSnap = await getDoc(doc(db, "internships", queryInternshipId, "courses", queryCourseId));
-            if (courseSnap.exists()) courseData = { id: courseSnap.id, ...courseSnap.data() };
-          }
+          const courseData = courseSnap?.exists()
+            ? { id: courseSnap.id, ...courseSnap.data() }
+            : { id: queryCourseId, title: "Course" };
           setCourse(courseData);
 
-          const submissionCollectionPath = collection(mcqDb, "copiedcourses", queryCourseId, "assignments", assignmentId, "submissions");
-          const submissionQuerySnap = await getDocs(query(submissionCollectionPath, where("studentId", "==", user.uid)));
-
-          let internshipChapters = [];
-          if (queryInternshipId) {
-            const chaptersRef = collection(
-              db,
-              "internships",
-              queryInternshipId,
-              "courses",
-              queryCourseId,
-              "chapters"
-            );
-            const chapterSnap = await getDocs(query(chaptersRef, orderBy("order", "asc")));
-            internshipChapters = chapterSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-          }
+          const internshipChapters = chapterSnap ? chapterSnap.docs.map((d) => ({ id: d.id, ...d.data() })) : [];
 
           if (isSuperAdmin) setHasAccess(true);
           else if (
@@ -329,7 +344,7 @@
         }
 
         // No query params: resolve course by slug and load assignment from master or first matching copy
-        const coursesSnap = await getDocs(collection(db, "courses"));
+        const coursesSnap = await coursesRead;
         const allCourses = coursesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
         const matchingCourse = allCourses.find((c) => createSlug(c.title) === slug);
 
@@ -342,32 +357,42 @@
         setCourse(matchingCourse);
         setCourseId(matchingCourse.id);
 
+        const needsChapters = !isSuperAdmin && !isInternshipRole && !isCrtRole;
+        const masterChaptersRead = needsChapters
+          ? getDocs(query(collection(db, "courses", foundCourseId, "chapters"), orderBy("order", "asc"))).catch(() => null)
+          : Promise.resolve(null);
+        const masterSubmissionRead = getDocs(
+          query(
+            collection(mcqDb, "courses", foundCourseId, "assignments", assignmentId, "submissions"),
+            where("studentId", "==", user.uid)
+          )
+        ).catch(() => null);
+
         let assignmentSnap = await getDoc(doc(mcqDb, "courses", foundCourseId, "assignments", assignmentId));
         let isCopied = false;
         let actualCourseId = foundCourseId;
 
         if (!assignmentSnap.exists()) {
-          let copiedCourseId = null;
-          const internshipsSnap = await getDocs(collection(db, "internships"));
-          for (const internshipDoc of internshipsSnap.docs) {
-            const insCoursesSnap = await getDocs(collection(db, "internships", internshipDoc.id, "courses"));
-            const copiedCourse = insCoursesSnap.docs.find((courseDoc) => createSlug(courseDoc.data().title) === slug);
-            if (copiedCourse) {
-              copiedCourseId = copiedCourse.id;
-              break;
-            }
-          }
-          if (!copiedCourseId) {
-            const crtSnap = await getDocs(collection(db, "crt"));
-            for (const crtDoc of crtSnap.docs) {
-              const crtCoursesSnap = await getDocs(collection(db, "crt", crtDoc.id, "courses"));
-              const copiedCourse = crtCoursesSnap.docs.find((courseDoc) => createSlug(courseDoc.data().title) === slug);
-              if (copiedCourse) {
-                copiedCourseId = copiedCourse.id;
-                break;
-              }
-            }
-          }
+          // Search every internship and CRT program in parallel instead of one by one.
+          const findCopiedCourse = async (rootName) => {
+            const rootSnap = await getDocs(collection(db, rootName));
+            const matches = await Promise.all(
+              rootSnap.docs.map(async (rootDoc) => {
+                try {
+                  const coursesSnap = await getDocs(collection(db, rootName, rootDoc.id, "courses"));
+                  return coursesSnap.docs.find((courseDoc) => createSlug(courseDoc.data().title) === slug)?.id || null;
+                } catch (_) {
+                  return null;
+                }
+              })
+            );
+            return matches.find(Boolean) || null;
+          };
+          const [internshipMatch, crtMatch] = await Promise.all([
+            findCopiedCourse("internships").catch(() => null),
+            findCopiedCourse("crt").catch(() => null),
+          ]);
+          const copiedCourseId = internshipMatch || crtMatch;
           if (copiedCourseId) {
             assignmentSnap = await getDoc(doc(mcqDb, "copiedcourses", copiedCourseId, "assignments", assignmentId));
             if (assignmentSnap.exists()) {
@@ -385,10 +410,20 @@
         setIsCopiedCourse(isCopied);
         if (isCopied) setCourseId(actualCourseId);
 
-        const submissionCollectionPath = isCopied
-          ? collection(mcqDb, "copiedcourses", actualCourseId, "assignments", assignmentId, "submissions")
-          : collection(mcqDb, "courses", foundCourseId, "assignments", assignmentId, "submissions");
-        const submissionQuerySnap = await getDocs(query(submissionCollectionPath, where("studentId", "==", user.uid)));
+        const submissionQuerySnap = isCopied
+          ? await getDocs(
+              query(
+                collection(mcqDb, "copiedcourses", actualCourseId, "assignments", assignmentId, "submissions"),
+                where("studentId", "==", user.uid)
+              )
+            )
+          : (await masterSubmissionRead) ||
+            (await getDocs(
+              query(
+                collection(mcqDb, "courses", foundCourseId, "assignments", assignmentId, "submissions"),
+                where("studentId", "==", user.uid)
+              )
+            ));
 
         const assignmentData = assignmentSnap.data();
         setAssignment({ id: assignmentSnap.id, ...assignmentData });
@@ -407,15 +442,17 @@
         else if (studentData?.chapterAccess && studentData.chapterAccess[foundCourseId]) {
           const allowedChapters = studentData.chapterAccess[foundCourseId];
           const assignmentDay = assignmentData.day || 1;
-          const chapterSnap = await getDocs(query(collection(db, "courses", foundCourseId, "chapters"), orderBy("order", "asc")));
+          const chapterSnap =
+            (await masterChaptersRead) ||
+            (await getDocs(query(collection(db, "courses", foundCourseId, "chapters"), orderBy("order", "asc"))));
           const chapters = chapterSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
           const targetChapter = chapters[assignmentDay - 1];
           if (targetChapter && allowedChapters.includes(targetChapter.id)) setHasAccess(true);
         } else if (isTrainer && userData) {
           const accessCourseId = isCopied ? actualCourseId : foundCourseId;
-          const chapterSnap = await getDocs(
-            query(collection(db, "courses", foundCourseId, "chapters"), orderBy("order", "asc"))
-          );
+          const chapterSnap =
+            (await masterChaptersRead) ||
+            (await getDocs(query(collection(db, "courses", foundCourseId, "chapters"), orderBy("order", "asc"))));
           const chapters = chapterSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
           const allowedChapters = normalizeUnlockedChapterIds(
             chapters,
@@ -457,6 +494,10 @@
       });
       return () => unsubscribe();
     }, [fetchData]);
+
+    useEffect(() => {
+      if (assignment?.type === "coding") loadMonaco();
+    }, [assignment?.type]);
 
     const handleMCQAnswer = (questionIndex, answerIndex) => {
       const question = assignment?.questions?.[questionIndex];
@@ -1994,7 +2035,7 @@
                             <span className="text-sm text-gray-600">
                               {Math.round(progressPercentage)}% Complete
                             </span>
-                          </div>
+                          </div>  
                           <div className="w-full bg-gray-200 rounded-full h-2">
                             <div 
                               className="bg-cyan-600 h-2 rounded-full transition-all duration-300"
