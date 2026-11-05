@@ -5,6 +5,7 @@ import { collection, getDocs } from "firebase/firestore";
 import { BellRing, CalendarCheck, Download, Percent, RefreshCw, TrendingDown, Users } from "lucide-react";
 import { auth, db } from "@/lib/firebase";
 import { csvEscape } from "@/lib/crtPlacementData";
+import { isCourseVisibleToBatch } from "@/lib/crtCourseFork";
 import {
   LOW_ATTENDANCE_PERCENT,
   fetchBatchAttendanceSessions,
@@ -74,12 +75,13 @@ export default function CrtBatchAttendanceReport({ programId, batchId, batchName
       .then((snap) =>
         setCourses(
           snap.docs
+            .filter((d) => !batchId || isCourseVisibleToBatch(d.data() || {}, batchId))
             .map((d) => ({ id: d.id, name: d.data()?.title || d.data()?.name || d.id }))
             .sort((a, b) => a.name.localeCompare(b.name))
         )
       )
       .catch(() => setCourses([]));
-  }, [programId]);
+  }, [programId, batchId]);
 
   useEffect(() => {
     setRoster([]);

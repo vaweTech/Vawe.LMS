@@ -7,6 +7,7 @@ import {
   loadVaweLogoBase64,
 } from "@/lib/interviewScorecardPdf";
 import {
+  linkSessionNameKey,
   linkSessionPhoneKey,
   readStoredLinkAssignment,
   resolveInterviewLinkAssignment,
@@ -22,6 +23,45 @@ function normalizeInterviewPhone(raw) {
   const digits = String(raw || "").replace(/\D/g, "");
   if (digits.length >= 10) return digits.slice(-10);
   return digits;
+}
+
+const AUTOSAVE_DEBOUNCE_MS = 2500;
+
+function autosaveKey(examId, phone10) {
+  return `interview-autosave:${examId}:${phone10}`;
+}
+
+function readLocalAutosave(examId, phone10) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(autosaveKey(examId, phone10));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalAutosave(examId, phone10, snapshot) {
+  try {
+    localStorage.setItem(autosaveKey(examId, phone10), JSON.stringify(snapshot));
+  } catch {
+    /* storage full or disabled — the attempt doc copy still works */
+  }
+}
+
+function clearLocalAutosave(examId, phone10) {
+  try {
+    localStorage.removeItem(autosaveKey(examId, phone10));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Server and browser copies can differ (e.g. last change not yet synced); keep the newer one. */
+function newestAutosave(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return (Number(b.savedAt) || 0) > (Number(a.savedAt) || 0) ? b : a;
 }
 
 async function submissionExistsForPhone(subCol, phoneDigits) {
@@ -85,6 +125,11 @@ export default function TakeInterviewExamPage() {
   const [nextLinkExam, setNextLinkExam] = useState(null);
   const [linkAllDone, setLinkAllDone] = useState(false);
   const nextLinkExamRef = useRef(null);
+  /** Link opened via ?linkToken= was deleted or deactivated by the admin. */
+  const [linkClosedMsg, setLinkClosedMsg] = useState("");
+  /** Phone whose OTP is already verified in this browser session (survives exam redirects). */
+  const verifiedPhoneRef = useRef("");
+  const attemptDocRefRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [answers, setAnswers] = useState({});
@@ -210,7 +255,11 @@ export default function TakeInterviewExamPage() {
         typeof window !== "undefined"
           ? sessionStorage.getItem(linkSessionPhoneKey(linkToken))
           : "";
+      const sessionName =
+        typeof window !== "undefined" ? sessionStorage.getItem(linkSessionNameKey(linkToken)) : "";
+      if (sessionName) setFullName((cur) => cur || sessionName);
       if (sessionPhone) {
+        verifiedPhoneRef.current = normalizeInterviewPhone(sessionPhone);
         setPhone(sessionPhone);
         setPhoneVerified(true);
         const stored = readStoredLinkAssignment(linkToken, sessionPhone);
@@ -243,7 +292,14 @@ export default function TakeInterviewExamPage() {
         const snap = await firestoreHelpers.getDoc(
           firestoreHelpers.doc(db, "interviewExamLinks", linkToken)
         );
-        if (!snap.exists()) return;
+        if (!snap.exists()) {
+          setLinkClosedMsg("This exam link is invalid or has been removed.");
+          return;
+        }
+        if (snap.data()?.active === false) {
+          setLinkClosedMsg("This exam link is no longer active.");
+          return;
+        }
 
         const label = String(snap.data()?.label || "").trim();
         if (label) {
@@ -299,8 +355,11 @@ export default function TakeInterviewExamPage() {
     }
   }, [examId]);
 
-  // Reset WhatsApp OTP when mobile number changes
+  // Reset WhatsApp OTP when mobile number changes (kept while the restored, already-verified link phone is loading)
   useEffect(() => {
+    const digits = normalizeInterviewPhone(phone);
+    if (verifiedPhoneRef.current && (!digits || digits === verifiedPhoneRef.current)) return;
+    verifiedPhoneRef.current = "";
     setPhoneVerified(false);
     setPhoneOtpSent(false);
     setPhoneOtpValue("");
@@ -646,15 +705,14 @@ export default function TakeInterviewExamPage() {
       const startingMs = Number.isFinite(initialMs) ? initialMs : duration * 60 * 1000;
       const endAt = Date.now() + startingMs;
       setTimeLeftMs(startingMs);
+      // Derive from the end time: intervals are throttled in background tabs and on locked phones.
       timerRef.current = setInterval(() => {
-        setTimeLeftMs((prev) => {
-          const next = Math.max(0, (prev ?? endAt - Date.now()) - 1000);
-          if (next <= 0) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-          }
-          return next;
-        });
+        const next = Math.max(0, endAt - Date.now());
+        setTimeLeftMs(next);
+        if (next <= 0) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
       }, 1000);
     }
   }, [exam]);
@@ -852,8 +910,10 @@ export default function TakeInterviewExamPage() {
       alert("A submission has already been received for this phone number.");
       return { blocked: true };
     }
+    const localSaved = readLocalAutosave(examId, normalizedPhone);
+    attemptDocRefRef.current = null;
     if (duration <= 0) {
-      return { blocked: false, remainingMs: null };
+      return { blocked: false, remainingMs: null, saved: localSaved };
     }
     const attemptsCol = firestoreHelpers.collection(db, "interviewExams", String(examId), "attempts");
     const qAttempt = firestoreHelpers.query(
@@ -863,28 +923,64 @@ export default function TakeInterviewExamPage() {
     const attemptSnap = await firestoreHelpers.getDocs(qAttempt);
     let startedAt = null;
     let attemptDocRef = null;
+    let attemptData = null;
     if (!attemptSnap.empty) {
       const firstDoc = attemptSnap.docs[0];
-      startedAt = firstDoc.data()?.startedAt || null;
+      attemptData = firstDoc.data() || {};
+      startedAt = attemptData.startedAt || null;
       attemptDocRef = firestoreHelpers.doc(db, "interviewExams", String(examId), "attempts", firstDoc.id);
     } else {
       startedAt = Date.now();
       const createdRef = await firestoreHelpers.addDoc(attemptsCol, {
         phone: normalizedPhone,
         startedAt,
+        autosaveEnabled: true,
       });
       attemptDocRef = firestoreHelpers.doc(db, "interviewExams", String(examId), "attempts", createdRef.id);
     }
+    attemptDocRefRef.current = attemptDocRef;
+    const saved = newestAutosave(attemptData?.autosave, localSaved);
     let remainingMs = duration * 60 * 1000 - (Date.now() - Number(startedAt || Date.now()));
     if (remainingMs <= 0 && attemptDocRef) {
-      // Reset timer for a fresh attempt when time is already over
+      if (attemptData?.autosaveEnabled) {
+        // Time ran out while away: submit whatever was saved instead of granting a fresh timer.
+        return { blocked: false, remainingMs: 0, expired: true, saved };
+      }
+      // Attempts from before auto-save have nothing to submit: give a fresh timer as before.
       startedAt = Date.now();
-      await firestoreHelpers.updateDoc(attemptDocRef, { startedAt });
+      await firestoreHelpers.updateDoc(attemptDocRef, { startedAt, autosaveEnabled: true });
       remainingMs = duration * 60 * 1000;
+    } else if (attemptData && !attemptData.autosaveEnabled) {
+      await firestoreHelpers.updateDoc(attemptDocRef, { autosaveEnabled: true });
     }
     setTimeLeftMs(remainingMs);
-    return { blocked: false, remainingMs };
+    return { blocked: false, remainingMs, saved };
   }, [exam, examId, checkBlockStatus]);
+
+  const restoreAutosave = useCallback((saved) => {
+    if (!saved) return;
+    if (saved.answers) setAnswers(saved.answers);
+    if (saved.codeLanguages) setCodeLanguages(saved.codeLanguages);
+    if (saved.runResults) setRunResults(saved.runResults);
+    if (saved.lastRunAtMap) setLastRunAtMap(saved.lastRunAtMap);
+    if (saved.reviewMap) setReviewMap(saved.reviewMap);
+  }, []);
+
+  // Auto-save: browser storage on every change, attempt doc a few seconds after the last change.
+  useEffect(() => {
+    if (!started) return undefined;
+    const phone10 = normalizeInterviewPhone(phone);
+    if (phone10.length < 10) return undefined;
+    const snapshot = JSON.parse(
+      JSON.stringify({ answers, codeLanguages, runResults, lastRunAtMap, reviewMap, savedAt: Date.now() })
+    );
+    writeLocalAutosave(examId, phone10, snapshot);
+    const t = setTimeout(() => {
+      const ref = attemptDocRefRef.current;
+      if (ref) firestoreHelpers.updateDoc(ref, { autosave: snapshot }).catch(() => {});
+    }, AUTOSAVE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [started, answers, codeLanguages, runResults, lastRunAtMap, reviewMap, examId, phone]);
 
   const handleSendWhatsappOtp = async () => {
     const phoneDigits = normalizeInterviewPhone(phone);
@@ -934,6 +1030,11 @@ export default function TakeInterviewExamPage() {
         setPhoneOtpValue("");
         setOtpSendError("");
         const verifiedPhone = normalizeInterviewPhone(otpPhoneSent || phone);
+        verifiedPhoneRef.current = verifiedPhone;
+        const linkToken = searchParams?.get("linkToken") || "";
+        if (linkToken && fullName.trim()) {
+          sessionStorage.setItem(linkSessionNameKey(linkToken), fullName.trim());
+        }
         await applyLinkAssignment(verifiedPhone);
         return;
       }
@@ -980,8 +1081,18 @@ export default function TakeInterviewExamPage() {
       alert("Please accept the rules to proceed.");
       return;
     }
+    const startLinkToken = searchParams?.get("linkToken") || "";
+    if (startLinkToken) sessionStorage.setItem(linkSessionNameKey(startLinkToken), fullName.trim());
     const attempt = await prepareAttempt(phoneDigits);
     if (attempt.blocked) return;
+    restoreAutosave(attempt.saved);
+    if (attempt.expired) {
+      // The time-up popup takes over and submits the restored answers.
+      setPendingStart(false);
+      setStarted(true);
+      setTimeLeftMs(0);
+      return;
+    }
     // Reset tab switch count when starting exam
     tabSwitchCountRef.current = 0;
     setTabSwitchCount(0);
@@ -1204,6 +1315,7 @@ export default function TakeInterviewExamPage() {
         lastRunAt: lastRunAtMap,
       };
       await firestoreHelpers.addDoc(subCol, payload);
+      clearLocalAutosave(examId, phoneDigits);
 
       const submitLinkToken = searchParams?.get("linkToken") || "";
       if (submitLinkToken && linkStep) {
@@ -1307,11 +1419,90 @@ export default function TakeInterviewExamPage() {
     }
   };
 
+  const AUTO_SUBMIT_SECONDS = 5;
+  const [timeUpCountdown, setTimeUpCountdown] = useState(null);
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+  const autoSubmitFiredRef = useRef(false);
+
+  useEffect(() => {
+    if (started && !isBlocked && timeLeftMs === 0 && timeUpCountdown === null && !autoSubmitFiredRef.current) {
+      setTimeUpCountdown(AUTO_SUBMIT_SECONDS);
+    }
+    if (!started && timeUpCountdown !== null) setTimeUpCountdown(null);
+  }, [started, isBlocked, timeLeftMs, timeUpCountdown]);
+
+  useEffect(() => {
+    if (timeUpCountdown === null) return undefined;
+    if (timeUpCountdown <= 0) {
+      if (!autoSubmitFiredRef.current) {
+        autoSubmitFiredRef.current = true;
+        handleSubmitRef.current();
+      }
+      return undefined;
+    }
+    const t = setTimeout(() => setTimeUpCountdown((c) => (c === null ? c : c - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [timeUpCountdown]);
+
+  const submitNowAfterTimeUp = () => {
+    if (submitting) return;
+    autoSubmitFiredRef.current = true;
+    setTimeUpCountdown(0);
+    handleSubmitRef.current();
+  };
+
+  const timeUpModal =
+    timeUpCountdown !== null ? (
+      <div
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 px-4"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="time-up-title"
+      >
+        <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-rose-100 text-2xl font-bold text-rose-600">
+            {submitting || timeUpCountdown <= 0 ? (
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-rose-600 border-t-transparent" />
+            ) : (
+              timeUpCountdown
+            )}
+          </div>
+          <h2 id="time-up-title" className="mt-4 text-xl font-bold text-slate-900">
+            Time&apos;s up!
+          </h2>
+          <p className="mt-2 text-sm text-slate-600">
+            {submitting || timeUpCountdown <= 0
+              ? "Submitting your answers…"
+              : `Your answers will be submitted automatically in ${timeUpCountdown} second${timeUpCountdown === 1 ? "" : "s"}.`}
+          </p>
+          <button
+            type="button"
+            onClick={submitNowAfterTimeUp}
+            disabled={submitting}
+            className="mt-5 w-full rounded-xl bg-[#00448a] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003a76] disabled:opacity-60"
+          >
+            {submitting ? "Submitting…" : timeUpCountdown <= 0 ? "Retry submit" : "Submit now"}
+          </button>
+        </div>
+      </div>
+    ) : null;
+
   if (loading) {
     return <div className="min-h-dvh flex items-center justify-center">Loading...</div>;
   }
   if (!exam) {
     return <div className="min-h-dvh flex items-center justify-center">Exam not found.</div>;
+  }
+  if (linkClosedMsg && !started && !showResults && !processing) {
+    return (
+      <div className="min-h-dvh bg-gradient-to-b from-sky-50 to-cyan-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full rounded-2xl border border-gray-200 bg-white shadow-sm p-8 text-center">
+          <p className="text-lg font-semibold text-red-800">Unable to open exam</p>
+          <p className="mt-2 text-sm text-gray-600">{linkClosedMsg}</p>
+        </div>
+      </div>
+    );
   }
   if (linkAllDone && !showResults && !processing) {
     return (
@@ -1328,6 +1519,7 @@ export default function TakeInterviewExamPage() {
 
   return (
     <div className="min-h-dvh bg-gradient-to-b from-sky-50 to-cyan-50">
+      {timeUpModal}
       {showResults && nextLinkExam && !embedInstituteSite && (
         <div className="fixed top-0 inset-x-0 z-[60] bg-[#00448a] text-white shadow-lg">
           <div className="max-w-4xl mx-auto px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -1881,7 +2073,9 @@ export default function TakeInterviewExamPage() {
 
           {/* Sticky Header */}
           <div className="sticky top-0 z-20 border-b bg-white shadow-sm">
-            <div className="max-w-4xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+            <div
+              className={`${started ? "max-w-7xl" : "max-w-4xl"} mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3`}
+            >
               <div className="flex-1 min-w-0">
                 <h1 className="text-xl sm:text-2xl font-bold text-gray-900 truncate">
                   {examDisplayTitle}
@@ -1930,7 +2124,14 @@ export default function TakeInterviewExamPage() {
             </div>
           </div>
 
-          <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+          <div
+            className={
+              started
+                ? "max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 lg:grid lg:grid-cols-[minmax(0,1fr)_17rem] lg:items-start lg:gap-6"
+                : "max-w-4xl mx-auto px-4 sm:px-6 py-4 sm:py-6"
+            }
+          >
+          <div className="min-w-0">
 
         {/* Pre-Exam Info (visible until started) */}
         {!started && (
@@ -2490,7 +2691,7 @@ export default function TakeInterviewExamPage() {
                 )}
 
                 {/* Navigation */}
-                <div className="mt-6 flex items-center justify-between">
+                <div className="mt-6 flex items-center justify-between gap-3">
                   <button
                     type="button"
                     onClick={() => {
@@ -2521,18 +2722,32 @@ export default function TakeInterviewExamPage() {
                     Previous
                   </button>
 
-                  <div className="hidden sm:flex items-center gap-1">
-                    {filteredIndices.map((qi, i) => (
-                      <button
-                        key={i}
-                        aria-label={`Go to question ${i + 1} in section`}
-                        onClick={() => setActiveIndex(qi)}
-                        className={`h-2.5 w-2.5 rounded-full ${
-                          i === currentPos ? "bg-cyan-600" : "bg-gray-300 hover:bg-gray-400"
-                        }`}
-                      />
-                    ))}
-                  </div>
+                  {totalInSection <= 15 ? (
+                    <div className="hidden sm:flex min-w-0 flex-1 items-center justify-center gap-1.5">
+                      {filteredIndices.map((qi, i) => (
+                        <button
+                          key={i}
+                          aria-label={`Go to question ${i + 1} in section`}
+                          onClick={() => setActiveIndex(qi)}
+                          className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                            i === currentPos ? "bg-cyan-600" : "bg-gray-300 hover:bg-gray-400"
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex min-w-0 flex-1 flex-col items-center gap-1.5 px-2">
+                      <span className="text-xs font-medium text-gray-600">
+                        {currentPos + 1} / {totalInSection}
+                      </span>
+                      <div className="hidden sm:block h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-gray-200">
+                        <div
+                          className="h-full rounded-full bg-cyan-600 transition-all"
+                          style={{ width: `${totalInSection ? ((currentPos + 1) / totalInSection) * 100 : 0}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   <button
                     type="button"
@@ -2619,7 +2834,7 @@ export default function TakeInterviewExamPage() {
                   <button
                     type="button"
                     onClick={() => setShowPanel(true)}
-                    className="sm:hidden px-3 py-1.5 rounded-md text-sm bg-gray-100 border border-gray-300"
+                    className="lg:hidden px-3 py-1.5 rounded-md text-sm bg-gray-100 border border-gray-300"
                   >
                     Questions
                   </button>
@@ -2632,7 +2847,7 @@ export default function TakeInterviewExamPage() {
 
         {/* Progress Bar - Always visible */}
         {started && (
-          <div className="mt-6 flex items-center justify-between">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-100 bg-white px-4 py-3 shadow-sm">
             <div className="text-sm text-gray-700">
               Progress: <span className="font-semibold">{progress.percent}%</span> ({progress.answered}/{progress.total})
             </div>
@@ -2653,15 +2868,15 @@ export default function TakeInterviewExamPage() {
         )}
       </div>
 
-      {/* Desktop Control Panel */}
+      {/* Desktop Control Panel — sticky right column of the exam grid */}
       {started && (
-        <div className="hidden lg:block fixed right-4 top-34 z-10">
-        <div className="bg-white rounded-xl shadow border p-4 w-64">
+        <aside className="hidden lg:block sticky top-24">
+        <div className="bg-white rounded-xl shadow-md border border-gray-100/80 p-4">
           <div className="flex items-center justify-between mb-3">
             <p className="font-semibold text-gray-900">Question Panel</p>
             <span className="text-xs text-gray-600">{progress.answered}/{progress.total}</span>
           </div>
-          <div className="grid grid-cols-6 gap-2">
+          <div className="grid grid-cols-6 gap-1.5 max-h-[calc(100vh-16rem)] overflow-y-auto pr-1">
             {filteredIndices.map((qi, i) => {
               const current = qi === activeIndex;
               const answered = isAnswered(qi);
@@ -2689,8 +2904,9 @@ export default function TakeInterviewExamPage() {
             <div className="flex items-center gap-2"><span className="w-3 h-3 rounded bg-purple-600 inline-block" />Marked</div>
           </div>
         </div>
-        </div>
+        </aside>
       )}
+      </div>
 
       {/* Mobile Bottom Sheet Panel */}
       {started && showPanel && (

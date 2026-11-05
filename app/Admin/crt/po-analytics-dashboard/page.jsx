@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   BarChart3,
   Building2,
+  ChevronDown,
   Download,
   IndianRupee,
   Lightbulb,
@@ -70,11 +71,14 @@ const SelectField = ({ label, value, onChange, options }) => (
       onChange={onChange}
       className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
     >
-      {options.map((option) => (
-        <option key={option} value={option}>
-          {option}
-        </option>
-      ))}
+      {options.map((option) => {
+        const { value: v, label: l } = typeof option === "object" ? option : { value: option, label: option };
+        return (
+          <option key={v} value={v}>
+            {l}
+          </option>
+        );
+      })}
     </select>
   </div>
 );
@@ -204,6 +208,72 @@ export default function CRTPOAnalyticsDashboardPage() {
     [filteredStudents]
   );
 
+  const [unplacedProgram, setUnplacedProgram] = useState("All");
+  const [unplacedBatch, setUnplacedBatch] = useState("All");
+  const [collapsedGroups, setCollapsedGroups] = useState(() => new Set());
+  const toggleGroup = (key) =>
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const unplacedProgramOptions = useMemo(() => {
+    const map = new Map();
+    students.forEach((s) => s.crtEnrollments?.forEach((e) => map.set(e.crtId, e.programName)));
+    return [
+      { value: "All", label: "All programs" },
+      ...[...map].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label)),
+    ];
+  }, [students]);
+
+  const unplacedBatchOptions = useMemo(() => {
+    const map = new Map();
+    students.forEach((s) =>
+      s.crtEnrollments?.forEach((e) => {
+        if (e.crtId === unplacedProgram) map.set(e.batchId, e.batchName);
+      })
+    );
+    return [
+      { value: "All", label: "All batches" },
+      ...[...map]
+        .map(([value, label]) => ({ value, label }))
+        .sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true })),
+    ];
+  }, [students, unplacedProgram]);
+
+  /** Unplaced students grouped program → batch, with each batch's placed/total for context. */
+  const unplacedGroups = useMemo(() => {
+    const groups = new Map();
+    const matches = (e) =>
+      (unplacedProgram === "All" || e.crtId === unplacedProgram) &&
+      (unplacedBatch === "All" || e.batchId === unplacedBatch);
+    filteredStudents.forEach((s) => {
+      s.crtEnrollments?.forEach((e) => {
+        if (!matches(e)) return;
+        const key = `${e.crtId}::${e.batchId}`;
+        const g = groups.get(key) || { key, ...e, total: 0, students: [] };
+        g.total += 1;
+        if (s.status === "Unplaced") g.students.push(s);
+        groups.set(key, g);
+      });
+    });
+    return [...groups.values()]
+      .filter((g) => g.students.length > 0)
+      .sort(
+        (a, b) =>
+          a.programName.localeCompare(b.programName) ||
+          (a.batchId === "") - (b.batchId === "") ||
+          a.batchName.localeCompare(b.batchName, undefined, { numeric: true })
+      );
+  }, [filteredStudents, unplacedProgram, unplacedBatch]);
+
+  const unplacedShownCount = useMemo(
+    () => new Set(unplacedGroups.flatMap((g) => g.students.map((s) => s.id))).size,
+    [unplacedGroups]
+  );
+
   const departmentOverview = useMemo(() => {
     const map = new Map();
     filteredStudents.forEach((s) => {
@@ -306,7 +376,7 @@ export default function CRTPOAnalyticsDashboardPage() {
   ];
 
   const handleExport = () => {
-    const header = ["Reg No", "Name", "Department", "Academic Year", "Status", "Companies", "Best Package LPA", "Latest Offer Date"];
+    const header = ["Reg No", "Name", "Department", "CRT Program", "Batch", "Academic Year", "Status", "Companies", "Best Package LPA", "Latest Offer Date"];
     const placedById = new Map(placedStudents.map((s) => [s.id, s]));
     const lines = filteredStudents.map((s) => {
       const p = placedById.get(s.id);
@@ -316,6 +386,8 @@ export default function CRTPOAnalyticsDashboardPage() {
         s.regNo,
         s.name,
         s.department,
+        [...new Set((s.crtEnrollments || []).map((e) => e.programName))].join("; "),
+        (s.crtEnrollments || []).map((e) => e.batchName).join("; "),
         s.academicYear,
         s.status,
         offers.map((o) => o.company).join("; "),
@@ -537,26 +609,122 @@ export default function CRTPOAnalyticsDashboardPage() {
               />
             </div>
 
-            <div className="mt-6">
-              <TableSection
-                title="Unplaced Students"
-                headers={["Reg No", "Name", "Dept", "Status"]}
-                rows={unplacedStudents}
-                empty="Every student in this filter is placed."
-                renderRow={(s) => (
-                  <tr key={s.id} className="border-b border-slate-100 hover:bg-slate-50/60">
-                    <td className="p-3 text-sm text-slate-600">{s.regNo}</td>
-                    <td className="p-3 text-sm text-slate-900 font-medium">{s.name}</td>
-                    <td className="p-3 text-sm text-slate-600">{s.department}</td>
-                    <td className="p-3 text-sm">
-                      <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-0.5 text-rose-700 text-xs font-medium">
-                        Unplaced
-                      </span>
-                    </td>
-                  </tr>
-                )}
-              />
-            </div>
+            <Card className="mt-6">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900">Unplaced Students</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {unplacedShownCount} unplaced · grouped by CRT program and batch
+                  </p>
+                  {unplacedGroups.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCollapsedGroups(
+                          unplacedGroups.every((g) => collapsedGroups.has(g.key))
+                            ? new Set()
+                            : new Set(unplacedGroups.map((g) => g.key))
+                        )
+                      }
+                      className="mt-2 text-xs font-semibold text-[#00448a] hover:underline"
+                    >
+                      {unplacedGroups.every((g) => collapsedGroups.has(g.key)) ? "Expand all" : "Collapse all"}
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 lg:w-[480px]">
+                  <SelectField
+                    label="CRT Program"
+                    value={unplacedProgram}
+                    onChange={(e) => {
+                      setUnplacedProgram(e.target.value);
+                      setUnplacedBatch("All");
+                    }}
+                    options={unplacedProgramOptions}
+                  />
+                  {unplacedProgram === "All" ? (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Batch</label>
+                      <div className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-400">
+                        Choose a program first
+                      </div>
+                    </div>
+                  ) : (
+                    <SelectField
+                      label="Batch"
+                      value={unplacedBatch}
+                      onChange={(e) => setUnplacedBatch(e.target.value)}
+                      options={unplacedBatchOptions}
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[560px] text-left">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50/80">
+                      {["Reg No", "Name", "Dept", "Status"].map((h) => (
+                        <th key={h} className="p-3 text-sm font-semibold text-slate-700">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  {unplacedGroups.map((g) => {
+                    const collapsed = collapsedGroups.has(g.key);
+                    return (
+                    <tbody key={g.key}>
+                      <tr className="border-b border-slate-200 bg-[#00448a]/5">
+                        <td colSpan={4} className="p-0">
+                          <button
+                            type="button"
+                            onClick={() => toggleGroup(g.key)}
+                            aria-expanded={!collapsed}
+                            className="flex w-full flex-wrap items-center justify-between gap-2 p-3 text-left hover:bg-[#00448a]/10"
+                          >
+                            <span className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                              <ChevronDown
+                                className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${collapsed ? "-rotate-90" : ""}`}
+                              />
+                              <span>
+                                {g.programName}
+                                <span className="mx-1.5 text-slate-400">·</span>
+                                <span className={g.batchId ? "text-[#00448a]" : "text-amber-700"}>{g.batchName}</span>
+                              </span>
+                            </span>
+                            <span className="text-xs text-slate-600">
+                              <span className="font-semibold text-rose-600">{g.students.length} unplaced</span> of{" "}
+                              {g.total} ({g.total - g.students.length} placed)
+                            </span>
+                          </button>
+                        </td>
+                      </tr>
+                      {!collapsed && g.students.map((s) => (
+                        <tr key={s.id} className="border-b border-slate-100 hover:bg-slate-50/60">
+                          <td className="p-3 text-sm text-slate-600">{s.regNo}</td>
+                          <td className="p-3 text-sm text-slate-900 font-medium">{s.name}</td>
+                          <td className="p-3 text-sm text-slate-600">{s.department}</td>
+                          <td className="p-3 text-sm">
+                            <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-0.5 text-rose-700 text-xs font-medium">
+                              Unplaced
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    );
+                  })}
+                  {unplacedGroups.length === 0 && (
+                    <tbody>
+                      <tr>
+                        <td colSpan={4} className="p-6 text-center text-sm text-slate-500">
+                          Every student in this filter is placed.
+                        </td>
+                      </tr>
+                    </tbody>
+                  )}
+                </table>
+              </div>
+            </Card>
 
             <Card className="mt-6">
               <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">

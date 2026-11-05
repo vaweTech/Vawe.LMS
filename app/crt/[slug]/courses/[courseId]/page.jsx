@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import CheckAuth from "../../../../../lib/CheckAuth";
 import { CrtProgrammeStrip } from "@/components/crt/MyCrtProgress";
+import { findMyCrtEnrollments } from "@/lib/crtStudentProgress";
 import { createSlug, createCourseUrl } from "../../../../../lib/urlUtils";
 import { db, auth, firestoreHelpers } from "../../../../../lib/firebase";
 import { isCrtStudentRole } from "../../../../../lib/studentRole";
@@ -405,10 +406,26 @@ export default function CRTCoursePage() {
           resolvedCrtId = crtDoc.id;
           const coursesRef = collection(db, "crt", crtDoc.id, "courses");
           const coursesSnap = await getDocs(coursesRef);
-          const found = coursesSnap.docs.find(
-            (c) => c.id === courseSlug || createSlug(c.data().title || "") === courseSlug
-          );
+          const found =
+            coursesSnap.docs.find((c) => c.id === courseSlug) ||
+            coursesSnap.docs.find(
+              (c) => !c.data().forkedFromCourseId && createSlug(c.data().title || "") === courseSlug
+            );
           if (found) {
+            const hiddenFor = Array.isArray(found.data().hiddenForBatchIds) ? found.data().hiddenForBatchIds : [];
+            if (hiddenFor.length > 0 && user?.uid) {
+              const mine = (await findMyCrtEnrollments(db, user)).find((e) => e.crtId === crtDoc.id);
+              const myBatchIds = (mine?.batches || []).map((b) => b.batchId);
+              const copy = coursesSnap.docs.find(
+                (c) =>
+                  c.data().forkedFromCourseId === found.id &&
+                  (c.data().batchIds || []).some((b) => myBatchIds.includes(b))
+              );
+              if (copy) {
+                router.replace(`/crt/${programSlug}/courses/${copy.id}`);
+                return;
+              }
+            }
             resolvedCourse = { id: found.id, ...found.data() };
             break;
           }
@@ -484,7 +501,7 @@ export default function CRTCoursePage() {
       }
     }
     resolveAndFetch();
-  }, [programSlug, courseSlug, program?.id, program?.title, program, user?.uid, user]);
+  }, [programSlug, courseSlug, program?.id, program?.title, program, user?.uid, user, router]);
 
   // Expand first visible day (locked viewers: first unlocked chapter; full preview: first chapter)
   useEffect(() => {

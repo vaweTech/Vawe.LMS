@@ -22,6 +22,7 @@ import {
 } from "firebase/firestore";
 import { resolveCrtAndCourse } from "../../lib/crtCourseResolve";
 import { SESSION_NOT_HELD } from "../../lib/crtAttendance";
+import { crtCourseUrlSegment, isCourseVisibleToBatch } from "../../lib/crtCourseFork";
 import {
   AcademicCapIcon,
   ArrowLeftIcon,
@@ -119,8 +120,15 @@ async function fetchAssignmentsForTrainer(db, trainerUid) {
       const coursesSnap = await getDocs(collection(db, "crt", programId, "courses"));
       for (const courseDoc of coursesSnap.docs) {
         const courseId = courseDoc.id;
-        if (courseIdAllowList && !courseIdAllowList.has(String(courseId))) continue;
         const course = courseDoc.data();
+        if (!isCourseVisibleToBatch(course, batchId)) continue;
+        if (
+          courseIdAllowList &&
+          !courseIdAllowList.has(String(courseId)) &&
+          !(course.forkedFromCourseId && courseIdAllowList.has(String(course.forkedFromCourseId)))
+        ) {
+          continue;
+        }
         const title = course.title || course.name || "Untitled course";
         let chapterCount = 0;
         try {
@@ -142,7 +150,7 @@ async function fetchAssignmentsForTrainer(db, trainerUid) {
           batchName: batch.name || batchId,
           courseId,
           courseName: title,
-          courseSlug: createSlug(title) || courseId,
+          courseSlug: crtCourseUrlSegment({ id: courseId, ...course }),
           schedule: batch.schedule || batch.classSchedule || "—",
           time: batch.time || batch.classTime || "—",
           startDate: batch.startDate || batch.start || "",

@@ -16,6 +16,7 @@ import {
 } from "firebase/firestore";
 import { signOut } from "firebase/auth";
 import { useAdminAccess } from "../../../AdminAccessContext";
+import { forkCourseForBatch, removeBatchCopy } from "@/lib/crtCourseFork";
 import {
   enrichCrtCoursesWithSubjectType,
   resolveCourseIsNonTechnical,
@@ -259,6 +260,9 @@ export default function ManageCRTCourses() {
   const [activeSectionIndex, setActiveSectionIndex] = useState(0);
   const [editingCrtTestId, setEditingCrtTestId] = useState("");
   const [crtName, setCrtName] = useState("");
+  const [crtBatches, setCrtBatches] = useState([]);
+  const [forkBatchId, setForkBatchId] = useState("");
+  const [forkBusy, setForkBusy] = useState(false);
 
   const sortedChapters = useMemo(
     () =>
@@ -375,6 +379,90 @@ export default function ManageCRTCourses() {
       }
     }
   }, [crtId, activeCourseId, initialCourseId, collegeSubdomain]);
+
+  useEffect(() => {
+    if (!crtId) return;
+    let cancelled = false;
+    firestoreHelpers
+      .getDocs(firestoreHelpers.collection(db, "crt", crtId, "batches"))
+      .then((snap) => {
+        if (cancelled) return;
+        setCrtBatches(
+          snap.docs
+            .map((d) => ({ id: d.id, name: d.data()?.name || d.id }))
+            .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+        );
+      })
+      .catch(() => !cancelled && setCrtBatches([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [crtId]);
+
+  const batchNameById = useMemo(
+    () => Object.fromEntries(crtBatches.map((b) => [b.id, b.name])),
+    [crtBatches]
+  );
+  const activeCourseMeta = crtCourses.find((c) => c.id === activeCourseId) || null;
+
+  async function handleCreateBatchCopy() {
+    if (!activeCourseMeta || !forkBatchId) return;
+    const batchName = batchNameById[forkBatchId] || forkBatchId;
+    if (
+      !confirm(
+        `Create a separate copy of "${activeCourseMeta.title || "this course"}" for ${batchName}?\n\n` +
+          `${batchName} will use the copy (days, tests, unlocks and attendance move to it). ` +
+          "Changes to the copy will not affect other batches, and changes to the shared course will no longer reach this batch."
+      )
+    ) {
+      return;
+    }
+    try {
+      setForkBusy(true);
+      const newId = await forkCourseForBatch(db, {
+        crtId,
+        courseId: activeCourseMeta.id,
+        batchId: forkBatchId,
+        batchName,
+        userId: user?.uid,
+      });
+      setForkBatchId("");
+      await fetchCrtCourses();
+      setActiveCourseId(newId);
+      router.push(`/Admin/crt/${crtId}/manage?course=${newId}`);
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to create the batch copy.");
+    } finally {
+      setForkBusy(false);
+    }
+  }
+
+  async function handleRemoveBatchCopy() {
+    if (!activeCourseMeta?.forkedFromCourseId) return;
+    const batchName = activeCourseMeta.forkedForBatchName || "this batch";
+    if (
+      !confirm(
+        `Delete ${batchName}'s copy and move it back to the shared course?\n\n` +
+          "Days, tests, day unlocks and attendance recorded on this copy will be removed."
+      )
+    ) {
+      return;
+    }
+    try {
+      setForkBusy(true);
+      const originalId = activeCourseMeta.forkedFromCourseId;
+      await removeBatchCopy(db, { crtId, copyCourseId: activeCourseMeta.id });
+      await fetchCrtCourses();
+      setActiveCourseId(originalId);
+      router.push(`/Admin/crt/${crtId}/manage?course=${originalId}`);
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to remove the batch copy.");
+    } finally {
+      setForkBusy(false);
+    }
+  }
 
   const fetchCrtTests = useCallback(async function fetchCrtTests() {
     if (!crtId) return;
@@ -1182,8 +1270,17 @@ export default function ManageCRTCourses() {
                   <div className="text-xs text-slate-500">
                     {c.courseCode || "No code"}
                   </div>
-                  <div className="mt-1">
+                  <div className="mt-1 flex flex-wrap gap-1">
                     <CourseSubjectTypeBadge isNonTechnical={c.isNonTechnical === true} />
+                    {c.forkedFromCourseId ? (
+                      <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800">
+                        Only {c.forkedForBatchName || "one batch"}
+                      </span>
+                    ) : Array.isArray(c.hiddenForBatchIds) && c.hiddenForBatchIds.length > 0 ? (
+                      <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                        Not for: {c.hiddenForBatchIds.map((b) => batchNameById[b] || b).join(", ")}
+                      </span>
+                    ) : null}
                   </div>
                 </button>
                 <button
@@ -1738,6 +1835,64 @@ export default function ManageCRTCourses() {
             </div>
           ) : (
             <>
+              {activeCourseMeta?.forkedFromCourseId ? (
+                <div className="mb-5 rounded-lg border border-violet-200 bg-violet-50 p-3 sm:p-4">
+                  <p className="text-sm font-semibold text-violet-900">
+                    Batch copy for {activeCourseMeta.forkedForBatchName || "one batch"}
+                  </p>
+                  <p className="mt-1 text-xs text-violet-800">
+                    Add days, practice tests or change content here — it only affects{" "}
+                    {activeCourseMeta.forkedForBatchName || "this batch"}. Other batches keep the shared course.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleRemoveBatchCopy}
+                    disabled={forkBusy}
+                    className="mt-3 rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {forkBusy ? "Working…" : "Delete copy and use the shared course again"}
+                  </button>
+                </div>
+              ) : activeCourseMeta && crtBatches.length > 1 ? (
+                <div className="mb-5 rounded-lg border border-slate-200 bg-slate-50 p-3 sm:p-4">
+                  <p className="text-sm font-semibold text-slate-800">Batch versions</p>
+                  <p className="mt-1 text-xs text-slate-600">
+                    This course is shared by all batches. To add days or practice for one batch only, give that
+                    batch its own copy.
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <select
+                      value={forkBatchId}
+                      onChange={(e) => setForkBatchId(e.target.value)}
+                      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm"
+                    >
+                      <option value="">Choose batch…</option>
+                      {crtBatches
+                        .filter((b) => !(activeCourseMeta.hiddenForBatchIds || []).includes(b.id))
+                        .map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {b.name}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleCreateBatchCopy}
+                      disabled={!forkBatchId || forkBusy}
+                      className="rounded-md bg-violet-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50"
+                    >
+                      {forkBusy ? "Copying…" : "Create copy for this batch"}
+                    </button>
+                  </div>
+                  {(activeCourseMeta.hiddenForBatchIds || []).length > 0 && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      Already using their own copy:{" "}
+                      {activeCourseMeta.hiddenForBatchIds.map((b) => batchNameById[b] || b).join(", ")}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+
               <form onSubmit={saveCourse} className="rounded-md">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>

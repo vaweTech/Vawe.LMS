@@ -218,11 +218,11 @@ export default function CRTDayAssignmentPage() {
           const coursesSnap = await getDocs(
             collection(db, "crt", crtDoc.id, "courses")
           );
-          const found = coursesSnap.docs.find(
-            (c) =>
-              c.id === courseSlug ||
-              createSlug(c.data().title || "") === courseSlug
-          );
+          const found =
+            coursesSnap.docs.find((c) => c.id === courseSlug) ||
+            coursesSnap.docs.find(
+              (c) => !c.data().forkedFromCourseId && createSlug(c.data().title || "") === courseSlug
+            );
           if (found) {
             resolvedCourse = { id: found.id, ...found.data() };
             break;

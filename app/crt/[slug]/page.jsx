@@ -11,6 +11,7 @@ import { collection, getDocs, query, where, doc, getDoc } from "firebase/firesto
 import { tenantSegments } from "@/lib/tenantPath";
 import { computeCrtStudentAttendance } from "@/lib/crtAttendance";
 import MyCrtProgressCard, { CrtProgrammeStrip, useMyCrtEnrollments } from "@/components/crt/MyCrtProgress";
+import { crtCourseUrlSegment, isCourseVisibleToAnyBatch } from "@/lib/crtCourseFork";
 import {
   ArrowLeftIcon,
   AcademicCapIcon,
@@ -312,20 +313,25 @@ export default function CRTProgramDetailPage() {
   const commonCourseNames = program.commonCourses || [];
   const technicalCourseNames = program.technicalCourses || [];
 
+  const myBatchIds = (myEnrollment?.batches || []).map((b) => b.batchId);
+  const visibleCrtCourses = crtCoursesFromFirestore.filter((c) =>
+    myEnrollment ? isCourseVisibleToAnyBatch(c, myBatchIds) : !c.forkedFromCourseId
+  );
+
   // When we have Firestore courses: common = in commonCourses list OR isNonTechnical from master; technical = rest
-  const commonCourseDocs = crtCoursesFromFirestore.length > 0
-    ? crtCoursesFromFirestore.filter(
+  const commonCourseDocs = visibleCrtCourses.length > 0
+    ? visibleCrtCourses.filter(
         (c) =>
           c.isNonTechnical === true ||
           (program.commonCourses || []).includes(c.title)
       )
     : [];
-  const technicalCourseDocs = crtCoursesFromFirestore.length > 0
-    ? crtCoursesFromFirestore.filter(
+  const technicalCourseDocs = visibleCrtCourses.length > 0
+    ? visibleCrtCourses.filter(
         (c) => !commonCourseDocs.some((x) => x.id === c.id)
       )
     : [];
-  const useFirestoreCourses = crtCoursesFromFirestore.length > 0;
+  const useFirestoreCourses = visibleCrtCourses.length > 0;
   const allTechnicalCourseDocs = technicalCourseDocs;
 
   return (
@@ -493,7 +499,7 @@ export default function CRTProgramDetailPage() {
                   ? commonCourseDocs.map((c) => (
                       <Link
                         key={c.id}
-                        href={`/crt/${slug}/courses/${createSlug(c.title || c.name || c.id)}`}
+                        href={`/crt/${slug}/courses/${crtCourseUrlSegment(c)}`}
                         className="group flex items-center justify-between gap-3 px-4 py-3.5 rounded-xl border border-amber-100 bg-amber-50/70 hover:bg-amber-100 hover:border-amber-200 hover:shadow-sm transition-all duration-200"
                       >
                         <span className="font-medium text-slate-800">{c.title || c.name || c.id}</span>
@@ -532,7 +538,7 @@ export default function CRTProgramDetailPage() {
                   ? allTechnicalCourseDocs.map((c) => (
                       <Link
                         key={c.id}
-                        href={`/crt/${slug}/courses/${createSlug(c.title || c.name || c.id)}`}
+                        href={`/crt/${slug}/courses/${crtCourseUrlSegment(c)}`}
                         className="group flex items-center justify-between gap-3 px-4 py-3.5 rounded-xl border border-pink-100 bg-pink-50/70 hover:bg-pink-100 hover:border-pink-200 hover:shadow-sm transition-all duration-200"
                       >
                         <span className="font-medium text-slate-800">{c.title || c.name || c.id}</span>

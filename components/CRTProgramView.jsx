@@ -8,6 +8,7 @@ import { createSlug } from "../lib/urlUtils";
 import { collection, getDocs, getDoc, doc, onSnapshot } from "firebase/firestore";
 import MyCrtProgressCard, { useMyCrtEnrollments } from "./crt/MyCrtProgress";
 import MyClassPanels from "./crt/MyClassPanels";
+import { crtCourseUrlSegment, isCourseVisibleToAnyBatch } from "../lib/crtCourseFork";
 
 export default function CRTProgramView({ user, profile, setProfile, showBackToDashboard, studentDocId }) {
   const [selectedCrtId, setSelectedCrtId] = useState(null);
@@ -120,6 +121,10 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
       : crtPrograms;
   const selectedProgram = crtPrograms.find((p) => p.id === selectedCrtId);
   const classEnrollment = enrollments.find((e) => e.crtId === selectedCrtId) || enrollments[0] || null;
+  const selectedBatchIds = (enrollments.find((e) => e.crtId === selectedCrtId)?.batches || []).map((b) => b.batchId);
+  const visibleCourses = assignedCrtIds.includes(selectedCrtId)
+    ? coursesWithProgress.filter((c) => isCourseVisibleToAnyBatch(c, selectedBatchIds))
+    : coursesWithProgress.filter((c) => !c.forkedFromCourseId);
 
   const displayName =
     profile?.name ||
@@ -277,7 +282,7 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#00448a]" />
                     <span className="ml-2">Loading courses...</span>
                   </div>
-                ) : coursesWithProgress.length === 0 ? (
+                ) : visibleCourses.length === 0 ? (
                   <div className="text-center py-8 text-gray-500 bg-gray-50 rounded-xl border border-gray-200">
                     <BookOpen className="w-10 h-10 mx-auto mb-2 text-gray-400" />
                     <p className="text-sm font-medium">No courses in this program</p>
@@ -285,13 +290,13 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                   </div>
                 ) : (
                   <div className="grid gap-3 sm:gap-4 sm:grid-cols-2 2xl:grid-cols-3">
-                    {coursesWithProgress.map((course) => {
+                    {visibleCourses.map((course) => {
                       const { openedChapters = 0, totalChapters = 0, percentage = 0 } = course;
                       const title = course.title || course.name || "Untitled";
                       return (
                         <Link
                           key={course.id}
-                          href={`/crt/${createSlug(selectedProgram?.name || selectedProgram?.title || selectedCrtId)}/courses/${createSlug(course.title || course.name || course.id)}`}
+                          href={`/crt/${createSlug(selectedProgram?.name || selectedProgram?.title || selectedCrtId)}/courses/${crtCourseUrlSegment(course)}`}
                           className="block bg-white border border-gray-100 rounded-xl shadow-sm p-4 hover:shadow-md hover:border-[#00448a]/30 transition-all text-left"
                         >
                           <h4 className="text-base font-semibold text-gray-900 line-clamp-2">
