@@ -15,6 +15,7 @@ import {
 import { requestWhatsAppOtp, verifyWhatsAppOtp } from "@/lib/whatsappOtpClient";
 import { isAppleMobileDevice } from "@/lib/deviceDetect";
 import MathTextDisplay from "@/components/MathTextDisplay";
+import CodingWorkspace from "@/components/interview/CodingWorkspace";
 import { auth, firebaseAuth, db, firestoreHelpers } from "../../../lib/firebase";
 import { scoreDescriptiveExam } from "@/lib/descriptiveGrammarScore";
 
@@ -669,6 +670,8 @@ export default function TakeInterviewExamPage() {
 
   const totalInSection = filteredIndices.length;
   const currentPos = filteredIndices.indexOf(activeIndex);
+  /** Coding questions get a full-width IDE layout instead of the centred column + side panel. */
+  const isCodingView = started && section === "coding";
   
   // Calculate if we're on the last question of the entire exam
   const isLastQuestionOfExam = useMemo(() => {
@@ -2074,7 +2077,7 @@ export default function TakeInterviewExamPage() {
           {/* Sticky Header */}
           <div className="sticky top-0 z-20 border-b bg-white shadow-sm">
             <div
-              className={`${started ? "max-w-7xl" : "max-w-4xl"} mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3`}
+              className={`${isCodingView ? "max-w-none lg:px-6 2xl:px-10" : started ? "max-w-7xl" : "max-w-4xl"} mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3`}
             >
               <div className="flex-1 min-w-0">
                 <h1 className="text-xl sm:text-2xl font-bold text-gray-900 truncate">
@@ -2126,9 +2129,11 @@ export default function TakeInterviewExamPage() {
 
           <div
             className={
-              started
-                ? "max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 lg:grid lg:grid-cols-[minmax(0,1fr)_17rem] lg:items-start lg:gap-6"
-                : "max-w-4xl mx-auto px-4 sm:px-6 py-4 sm:py-6"
+              isCodingView
+                ? "w-full px-3 sm:px-4 lg:px-6 2xl:px-10 py-3 sm:py-4"
+                : started
+                  ? "max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6 lg:grid lg:grid-cols-[minmax(0,1fr)_17rem] lg:items-start lg:gap-6"
+                  : "max-w-4xl mx-auto px-4 sm:px-6 py-4 sm:py-6"
             }
           >
           <div className="min-w-0">
@@ -2433,7 +2438,7 @@ export default function TakeInterviewExamPage() {
 
         {/* Question Area */}
         {started && (
-          <div className="bg-white rounded-xl shadow p-4 sm:p-6">
+          <div className={`bg-white rounded-xl shadow ${isCodingView ? "p-3 sm:p-4" : "p-4 sm:p-6"}`}>
           {(() => {
             if (totalInSection === 0) {
               return (
@@ -2466,10 +2471,31 @@ export default function TakeInterviewExamPage() {
             const mcqTags = q.type === "mcq" ? normalizeTopicsFromUnknown(q?.topics ?? q?.topic) : [];
             return (
               <div className="">
-                <div className="flex items-start justify-between gap-3 mb-3">
-                  <p className="font-semibold text-gray-900 text-base sm:text-lg">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                  <p className="font-semibold text-gray-900 text-base sm:text-lg 2xl:text-xl">
                     Question {currentPos + 1} of {totalInSection}
                   </p>
+                  {isCodingView && totalInSection > 1 && (
+                    <div className="flex flex-wrap items-center gap-1.5" aria-label="Coding questions">
+                      {filteredIndices.map((qi, i) => {
+                        let cls = "bg-gray-100 text-gray-700 hover:bg-gray-200";
+                        if (isAnswered(qi)) cls = "bg-green-600 text-white";
+                        if (reviewMap[qi]) cls = "bg-purple-600 text-white";
+                        if (qi === activeIndex) cls = "bg-cyan-600 text-white ring-2 ring-cyan-200";
+                        return (
+                          <button
+                            key={qi}
+                            type="button"
+                            onClick={() => setActiveIndex(qi)}
+                            className={`h-8 min-w-8 px-2 rounded-md text-xs font-semibold 2xl:h-9 2xl:min-w-9 2xl:text-sm ${cls}`}
+                            title={`Question ${i + 1}`}
+                          >
+                            {i + 1}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 {(() => {
                   const companies = normalizeTopicsFromUnknown(q?.companyNames ?? q?.companyName);
@@ -2490,7 +2516,7 @@ export default function TakeInterviewExamPage() {
                     </div>
                   );
                 })()}
-                <MathTextDisplay className="mb-4">{q.question}</MathTextDisplay>
+                {q.type !== "coding" && <MathTextDisplay className="mb-4">{q.question}</MathTextDisplay>}
                 {q.type === "mcq" && q.questionImage ? (
                   <div className="mb-4">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -2535,14 +2561,6 @@ export default function TakeInterviewExamPage() {
                         {tg}
                       </span>
                     ))}
-                  </div>
-                )}
-                {q.type === "coding" && (
-                  <div className="mb-3 text-xs text-gray-600">
-                    Level:{" "}
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 border border-gray-200">
-                      {String(q.section || "easy")}
-                    </span>
                   </div>
                 )}
                 {q.type === "mcq" ? (
@@ -2597,97 +2615,17 @@ export default function TakeInterviewExamPage() {
                     className="w-full border rounded-lg px-3 py-2 min-h-[140px] focus:ring-2 focus:ring-cyan-500"
                   />
                 ) : (
-                  <div className="space-y-3">
-                    <div className="rounded-lg border bg-gray-50 p-3 text-xs text-gray-700">
-                      <p className="font-semibold mb-1">Test Cases</p>
-                      {(q.testCases || []).length === 0 ? (
-                        <p className="text-gray-500">No test cases provided.</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {(q.testCases || []).map((tc, i) => (
-                            <div key={i} className="grid sm:grid-cols-2 gap-2">
-                              <div className="bg-white border rounded p-2">
-                                <p className="text-[11px] text-gray-500 mb-1">Input {i + 1}</p>
-                                <pre className="whitespace-pre-wrap text-xs text-gray-800">{tc.input || "—"}</pre>
-                              </div>
-                              <div className="bg-white border rounded p-2">
-                                <p className="text-[11px] text-gray-500 mb-1">Output {i + 1}</p>
-                                <pre className="whitespace-pre-wrap text-xs text-gray-800">{tc.output || "—"}</pre>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <label className="text-sm text-gray-700">Language</label>
-                      <select
-                        value={codeLanguages[activeIndex] || "javascript"}
-                        onChange={(e) => handleLanguageChange(activeIndex, e.target.value)}
-                        className="border rounded-lg px-3 py-2 text-sm bg-white"
-                      >
-                        <option value="javascript">JavaScript</option>
-                        <option value="python">Python</option>
-                        <option value="java">Java</option>
-                        <option value="c">C</option>
-                        <option value="cpp">C++</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => runAllTestCases(activeIndex, q.testCases || [])}
-                        disabled={runLoading[activeIndex]}
-                        className={`px-4 py-2 rounded-lg text-white text-sm ${
-                          runLoading[activeIndex] ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
-                        }`}
-                      >
-                        {runLoading[activeIndex] ? "Running..." : "Run All Test Cases"}
-                      </button>
-                    </div>
-                    <textarea
-                      value={answers[activeIndex] || ""}
-                      onChange={(e) => handleText(activeIndex, e.target.value)}
-                      placeholder="Write your solution..."
-                      className="w-full border rounded-lg px-3 py-2 min-h-[160px] focus:ring-2 focus:ring-cyan-500"
-                    />
-                    {Array.isArray(runResults[activeIndex]) && runResults[activeIndex].length > 0 && (
-                      <div className="rounded-lg border p-3 text-xs text-gray-700">
-                        <div className="flex items-center justify-between mb-2">
-                          <p className="font-semibold">Run Results</p>
-                          <span className="text-[11px] text-gray-500">
-                            {runResults[activeIndex].filter((r) => r.pass).length}/
-                            {runResults[activeIndex].length} passed
-                          </span>
-                        </div>
-                        <div className="space-y-2">
-                          {runResults[activeIndex].map((r, i) => (
-                            <div
-                              key={i}
-                              className={`rounded border p-2 ${
-                                r.pass ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
-                              }`}
-                            >
-                              <div className="flex items-center justify-between text-[11px] mb-1">
-                                <span>Test Case {i + 1}</span>
-                                <span className={r.pass ? "text-green-700" : "text-red-700"}>
-                                  {r.pass ? "PASS" : "FAIL"}
-                                </span>
-                              </div>
-                              <div className="grid sm:grid-cols-2 gap-2">
-                                <div>
-                                  <div className="text-[11px] text-gray-500 mb-1">Expected</div>
-                                  <pre className="whitespace-pre-wrap text-xs text-gray-800">{r.expected || "—"}</pre>
-                                </div>
-                                <div>
-                                  <div className="text-[11px] text-gray-500 mb-1">Actual</div>
-                                  <pre className="whitespace-pre-wrap text-xs text-gray-800">{r.actual || "—"}</pre>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <CodingWorkspace
+                    question={q}
+                    questionKey={activeIndex}
+                    code={answers[activeIndex] || ""}
+                    onCodeChange={(value) => handleText(activeIndex, value)}
+                    language={codeLanguages[activeIndex] || "javascript"}
+                    onLanguageChange={(value) => handleLanguageChange(activeIndex, value)}
+                    onRun={() => runAllTestCases(activeIndex, q.testCases || [])}
+                    running={Boolean(runLoading[activeIndex])}
+                    results={runResults[activeIndex]}
+                  />
                 )}
 
                 {/* Navigation */}
@@ -2869,7 +2807,7 @@ export default function TakeInterviewExamPage() {
       </div>
 
       {/* Desktop Control Panel — sticky right column of the exam grid */}
-      {started && (
+      {started && !isCodingView && (
         <aside className="hidden lg:block sticky top-24">
         <div className="bg-white rounded-xl shadow-md border border-gray-100/80 p-4">
           <div className="flex items-center justify-between mb-3">
