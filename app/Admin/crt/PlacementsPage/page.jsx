@@ -11,7 +11,6 @@ import {
   ChartBarIcon,
   BriefcaseIcon,
 } from "@heroicons/react/24/outline";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { useAdminAccess } from "../../AdminAccessContext";
 import {
   ALL_DEPARTMENTS,
@@ -44,8 +43,6 @@ const EMPTY_DRIVE_FORM = {
   maxBacklogs: "",
 };
 
-const PIE_COLORS = ["#10b981", "#ef4444"];
-
 const inputClass =
   "w-full border border-slate-200 p-3 rounded-2xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-200 outline-none transition";
 
@@ -56,15 +53,16 @@ function friendlyError(err, fallback) {
   return err?.message || fallback;
 }
 
-function StatCard({ title, value, color, Icon, iconBg }) {
+function StatCard({ title, value, hint, color, Icon, iconBg }) {
   return (
-    <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-5 hover:shadow-xl hover:-translate-y-1 transition-all duration-300">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="rounded-3xl bg-white border border-slate-200 shadow-sm p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <p className="text-sm text-slate-500 font-medium">{title}</p>
           <h2 className={`text-3xl font-bold mt-2 ${color}`}>{value}</h2>
+          {hint ? <p className="mt-2 text-xs text-slate-500">{hint}</p> : null}
         </div>
-        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-inner ring-1 ring-black/[0.04] ${iconBg}`}>
+        <div className={`w-12 h-12 shrink-0 rounded-2xl flex items-center justify-center ${iconBg}`}>
           <Icon className={`h-6 w-6 ${color}`} aria-hidden />
         </div>
       </div>
@@ -427,11 +425,6 @@ export default function SingleCollegePlacementERP() {
     ? ((stats.placedStudents / stats.totalStudents) * 100).toFixed(1)
     : "0.0";
 
-  const pieData = [
-    { name: "Placed", value: stats.placedStudents },
-    { name: "Unplaced", value: stats.unplacedStudents },
-  ];
-
   const filteredDrives = useMemo(() => {
     const q = placementSearch.trim().toLowerCase();
     if (!q) return yearDrives;
@@ -487,6 +480,127 @@ export default function SingleCollegePlacementERP() {
       }),
     [filteredDrives, participantsByDrive, getPlacementStatus]
   );
+
+  /** Highest package from a created drive or a PO-recorded offer, with its company and job. */
+  const bestPackage = useMemo(() => {
+    let best = null;
+    const consider = (packageLpa, companyName, role, source) => {
+      const pkg = Number(packageLpa) || 0;
+      const company = String(companyName || "").trim();
+      if (pkg <= 0 || !company || company === "—") return;
+      if (!best || pkg > best.packageLpa) {
+        best = { packageLpa: pkg, companyName: company, role: String(role || "").trim(), source };
+      }
+    };
+    yearDrives.forEach((drive) => consider(drive.packageLpa, drive.companyName, drive.role, "drive"));
+    cohort.forEach((student) => {
+      (student.offers || []).forEach((offer) => consider(offer.packageLpa, offer.company, "", "offer"));
+    });
+    return best;
+  }, [yearDrives, cohort]);
+
+  /** Same company list as the PO dashboard, including a drive as soon as its job is created. */
+  const companyRecruitment = useMemo(() => {
+    const byCompany = new Map();
+    const ensure = (name) => {
+      const key = companyKey(name);
+      if (!key) return null;
+      if (!byCompany.has(key)) {
+        byCompany.set(key, {
+          company: String(name).trim(),
+          jobs: new Set(),
+          packages: [],
+          drivePackage: 0,
+          recruited: new Set(),
+          offers: 0,
+        });
+      }
+      return byCompany.get(key);
+    };
+    yearDrives.forEach((drive) => {
+      const entry = ensure(drive.companyName);
+      if (!entry) return;
+      if (drive.role) entry.jobs.add(drive.role);
+      if (drive.packageLpa > entry.drivePackage) entry.drivePackage = drive.packageLpa;
+    });
+    participations.forEach((row) => {
+      if (!row.placed) return;
+      const entry = ensure(row.companyName);
+      if (!entry) return;
+      entry.offers += 1;
+      entry.recruited.add(row.uid);
+    });
+    cohort.forEach((student) => {
+      (student.offers || []).forEach((offer) => {
+        const entry = byCompany.get(companyKey(offer.company));
+        if (entry && offer.packageLpa > 0) entry.packages.push(offer.packageLpa);
+      });
+    });
+    return [...byCompany.values()]
+      .map((row) => ({
+        company: row.company,
+        job: row.jobs.size ? [...row.jobs].join(", ") : "—",
+        recruited: row.recruited.size,
+        offers: row.offers,
+        packageLpa: row.packages.length
+          ? (row.packages.reduce((sum, value) => sum + value, 0) / row.packages.length).toFixed(1)
+          : row.drivePackage > 0
+            ? row.drivePackage.toFixed(1)
+            : "0.0",
+      }))
+      .sort((a, b) => Number(b.packageLpa) - Number(a.packageLpa) || a.company.localeCompare(b.company));
+  }, [yearDrives, participations, cohort]);
+
+  const packageSummary = useMemo(() => {
+    const offerPackages = [];
+    cohort.forEach((student) => {
+      (student.offers || []).forEach((offer) => {
+        if (offer.packageLpa > 0) offerPackages.push(offer.packageLpa);
+      });
+    });
+    const drivePackages = yearDrives.map((drive) => Number(drive.packageLpa) || 0).filter((value) => value > 0);
+    const values = offerPackages.length ? offerPackages : drivePackages;
+    const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    return {
+      average,
+      label: offerPackages.length
+        ? "Average of recorded PO offers"
+        : drivePackages.length
+          ? "Average package on open drives"
+          : "No packages recorded yet",
+    };
+  }, [cohort, yearDrives]);
+
+  const drivePipeline = useMemo(() => {
+    const counts = { Upcoming: 0, Current: 0, Past: 0 };
+    yearDrives.forEach((drive) => {
+      counts[getPlacementStatus(drive.driveDate)] += 1;
+    });
+    const next = yearDrives
+      .filter((drive) => getPlacementStatus(drive.driveDate) !== "Past")
+      .slice()
+      .sort((a, b) => a.driveDate.localeCompare(b.driveDate))
+      .slice(0, 3);
+    return { counts, next };
+  }, [yearDrives, getPlacementStatus]);
+
+  const departmentSnapshot = useMemo(() => {
+    const map = new Map();
+    cohort.forEach((student) => {
+      const name = student.department || "General";
+      const row = map.get(name) || { department: name, total: 0, placed: 0 };
+      row.total += 1;
+      if (student.status === "Placed") row.placed += 1;
+      map.set(name, row);
+    });
+    return [...map.values()]
+      .map((row) => ({
+        ...row,
+        rate: row.total ? Math.round((row.placed / row.total) * 100) : 0,
+      }))
+      .sort((a, b) => b.rate - a.rate || b.placed - a.placed || a.department.localeCompare(b.department))
+      .slice(0, 6);
+  }, [cohort]);
 
   const companyAnalytics = useMemo(() => buildAnalytics(participations, "companyName", "department"), [participations]);
   const departmentAnalytics = useMemo(() => buildAnalytics(participations, "department", "companyName"), [participations]);
@@ -690,7 +804,7 @@ export default function SingleCollegePlacementERP() {
                   <p className="uppercase tracking-[0.25em] text-xs md:text-sm text-blue-100 font-semibold">
                     Placement ERP Dashboard
                   </p>
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-white/20 border border-white/30 px-3 py-1 text-xs font-semibold text-white backdrop-blur">
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-white border border-white px-3 py-1 text-xs font-semibold text-black">
                     <span className={`h-1.5 w-1.5 rounded-full ${loadError ? "bg-rose-300" : "bg-emerald-300 animate-pulse"}`} />
                     {loadError ? "Sync error" : "Live"} · {selectedYear === "all" ? "All years" : `Year ${selectedYear}`}
                   </span>
@@ -705,13 +819,13 @@ export default function SingleCollegePlacementERP() {
               </div>
 
               <div className="grid grid-cols-2 gap-4 min-w-[280px]">
-                <div className="bg-white/15 backdrop-blur rounded-3xl p-5 border border-white/20">
-                  <p className="text-sm text-white/90 font-semibold">Placement Rate</p>
-                  <p className="text-3xl text-white font-bold mt-2">{loading ? "…" : `${placementRate}%`}</p>
+                <div className="bg-white rounded-3xl p-5 border border-white">
+                  <p className="text-sm text-black font-semibold">Placement Rate</p>
+                  <p className="text-3xl text-black font-bold mt-2">{loading ? "…" : `${placementRate}%`}</p>
                 </div>
-                <div className="bg-white/15 backdrop-blur rounded-3xl p-5 border border-white/20">
-                  <p className="text-sm text-white/90 font-semibold">Total Drives</p>
-                  <p className="text-3xl text-white font-bold mt-2">{loading ? "…" : stats.totalPlacements}</p>
+                <div className="bg-white rounded-3xl p-5 border border-white">
+                  <p className="text-sm text-black font-semibold">Total Drives</p>
+                  <p className="text-3xl text-black font-bold mt-2">{loading ? "…" : stats.totalPlacements}</p>
                 </div>
               </div>
             </div>
@@ -798,39 +912,209 @@ export default function SingleCollegePlacementERP() {
                 }
               />
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
-                <StatCard title="Total Students" value={stats.totalStudents} color="text-indigo-600" iconBg="bg-indigo-50" Icon={AcademicCapIcon} />
-                <StatCard title="Placed" value={stats.placedStudents} color="text-emerald-600" iconBg="bg-emerald-50" Icon={CheckCircleIcon} />
-                <StatCard title="Unplaced" value={stats.unplacedStudents} color="text-rose-600" iconBg="bg-rose-50" Icon={XCircleIcon} />
-                <StatCard title="Offers" value={stats.finalRoundPlaced} color="text-blue-600" iconBg="bg-blue-50" Icon={FlagIcon} />
-                <StatCard title="Rounds Cleared" value={stats.totalRoundsCleared} color="text-violet-600" iconBg="bg-violet-50" Icon={ChartBarIcon} />
-                <StatCard title="Drives" value={stats.totalPlacements} color="text-orange-600" iconBg="bg-orange-50" Icon={BriefcaseIcon} />
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                <StatCard
+                  title="Total Students"
+                  value={stats.totalStudents}
+                  hint={selectedYear === "all" ? "Every CRT student" : `Cohort for ${selectedYear}`}
+                  color="text-indigo-600"
+                  iconBg="bg-indigo-50"
+                  Icon={AcademicCapIcon}
+                />
+                <StatCard
+                  title="Placed"
+                  value={stats.placedStudents}
+                  hint={`${placementRate}% of this cohort`}
+                  color="text-emerald-600"
+                  iconBg="bg-emerald-50"
+                  Icon={CheckCircleIcon}
+                />
+                <StatCard
+                  title="Unplaced"
+                  value={stats.unplacedStudents}
+                  hint="Still waiting for an offer"
+                  color="text-rose-600"
+                  iconBg="bg-rose-50"
+                  Icon={XCircleIcon}
+                />
+                <StatCard
+                  title="Offers"
+                  value={stats.finalRoundPlaced}
+                  hint="Selections across companies"
+                  color="text-blue-600"
+                  iconBg="bg-blue-50"
+                  Icon={FlagIcon}
+                />
+                <StatCard
+                  title="Rounds Cleared"
+                  value={stats.totalRoundsCleared}
+                  hint="Progress recorded on drives"
+                  color="text-violet-600"
+                  iconBg="bg-violet-50"
+                  Icon={ChartBarIcon}
+                />
+                <StatCard
+                  title="Drives"
+                  value={stats.totalPlacements}
+                  hint={`${drivePipeline.counts.Upcoming} upcoming · ${drivePipeline.counts.Current} live · ${drivePipeline.counts.Past} done`}
+                  color="text-orange-600"
+                  iconBg="bg-orange-50"
+                  Icon={BriefcaseIcon}
+                />
               </div>
 
               <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mt-6">
-                <Card className="p-6 xl:col-span-2">
-                  <h3 className="text-xl font-bold text-slate-800 mb-4">Placed vs Unplaced</h3>
-                  {stats.totalStudents === 0 ? (
-                    <p className="h-80 flex items-center justify-center text-sm text-slate-500">
-                      No CRT students found for this year.
-                    </p>
-                  ) : (
-                    <div className="h-80">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie data={pieData} cx="50%" cy="50%" outerRadius={110} dataKey="value" label>
-                            {pieData.map((_, index) => (
-                              <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
+                <Card className="p-6">
+                  <h3 className="text-xl font-bold text-slate-900">Placement mix</h3>
+                  <p className="text-sm text-slate-500 mt-1">Share of the cohort that already has an offer.</p>
+                  <p className="mt-5 text-4xl font-bold text-slate-900">{placementRate}%</p>
+                  <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100 flex">
+                    <div className="h-full bg-emerald-500" style={{ width: `${stats.totalStudents ? (stats.placedStudents / stats.totalStudents) * 100 : 0}%` }} />
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl bg-emerald-50 px-3 py-3">
+                      <p className="text-xs font-medium text-emerald-700">Placed</p>
+                      <p className="mt-1 text-xl font-bold text-emerald-700">{stats.placedStudents}</p>
                     </div>
-                  )}
+                    <div className="rounded-2xl bg-rose-50 px-3 py-3">
+                      <p className="text-xs font-medium text-rose-700">Unplaced</p>
+                      <p className="mt-1 text-xl font-bold text-rose-700">{stats.unplacedStudents}</p>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card className="p-6">
+                  <h3 className="text-xl font-bold text-slate-900">Packages</h3>
+                  <p className="text-sm text-slate-500 mt-1">{packageSummary.label}</p>
+                  <div className="mt-5 space-y-4">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Best</p>
+                      {bestPackage ? (
+                        <>
+                          <p className="mt-1 text-3xl font-bold text-slate-900">{bestPackage.packageLpa.toFixed(1)} LPA</p>
+                          <p className="mt-2 text-sm font-semibold text-slate-800">{bestPackage.companyName}</p>
+                          {bestPackage.role ? <p className="text-sm text-slate-600">{bestPackage.role}</p> : null}
+                          <p className="mt-1 text-xs text-slate-500">
+                            {bestPackage.source === "drive" ? "Placement drive" : "PO offer"}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="mt-2 text-sm text-slate-500">No package recorded for this year.</p>
+                      )}
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Average</p>
+                      <p className="mt-1 text-2xl font-bold text-slate-900">{packageSummary.average.toFixed(1)} LPA</p>
+                    </div>
+                  </div>
+                </Card>
+
+                <Card className="p-6">
+                  <h3 className="text-xl font-bold text-slate-900">Drive pipeline</h3>
+                  <p className="text-sm text-slate-500 mt-1">Where this year’s drives stand today.</p>
+                  <div className="mt-5 grid grid-cols-3 gap-2">
+                    {[
+                      ["Upcoming", drivePipeline.counts.Upcoming, "bg-sky-50 text-sky-800"],
+                      ["Live", drivePipeline.counts.Current, "bg-emerald-50 text-emerald-800"],
+                      ["Done", drivePipeline.counts.Past, "bg-slate-100 text-slate-700"],
+                    ].map(([label, count, tone]) => (
+                      <div key={label} className={`rounded-2xl px-2 py-3 text-center ${tone}`}>
+                        <p className="text-xs font-medium">{label}</p>
+                        <p className="mt-1 text-xl font-bold">{count}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-5 space-y-3">
+                    {drivePipeline.next.length === 0 ? (
+                      <p className="text-sm text-slate-500">No upcoming or live drives.</p>
+                    ) : (
+                      drivePipeline.next.map((drive) => (
+                        <div key={drive.id} className="flex items-start justify-between gap-3 border-t border-slate-100 pt-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-slate-900">{drive.companyName}</p>
+                            <p className="truncate text-xs text-slate-500">{drive.role}</p>
+                          </div>
+                          <p className="shrink-0 text-xs font-medium text-slate-600">{drive.driveDate}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </Card>
               </div>
+
+              <Card className="mt-6 p-6">
+                <h3 className="text-xl font-bold text-slate-900">Department placement</h3>
+                <p className="text-sm text-slate-500 mt-1">Top branches by placement rate in this cohort.</p>
+                <div className="mt-5 space-y-4">
+                  {departmentSnapshot.length === 0 ? (
+                    <p className="text-sm text-slate-500">No students for this year.</p>
+                  ) : (
+                    departmentSnapshot.map((row) => (
+                      <div key={row.department}>
+                        <div className="mb-1.5 flex items-center justify-between gap-3 text-sm">
+                          <span className="font-medium text-slate-800">{row.department}</span>
+                          <span className="text-slate-500">
+                            {row.placed}/{row.total} · {row.rate}%
+                          </span>
+                        </div>
+                        <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+                          <div className="h-full rounded-full bg-indigo-600" style={{ width: `${row.rate}%` }} />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </Card>
+
+              <Card className="mt-6 overflow-hidden">
+                <div className="p-5 border-b border-slate-100">
+                  <h3 className="text-xl font-bold text-slate-800">Company-wise Recruitment</h3>
+                  <p className="text-sm text-slate-500 mt-1">
+                    Companies and jobs from drives, with the students each one has recruited.
+                  </p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[720px] text-left">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        {["Company", "Job", "Students Recruited", "Offers Made", "Package"].map((heading) => (
+                          <th key={heading} className="p-4 text-sm font-semibold text-slate-600">
+                            {heading}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {companyRecruitment.map((row) => (
+                        <tr key={row.company} className="border-t border-slate-100 hover:bg-slate-50/70">
+                          <td className="p-4 text-sm font-semibold text-slate-800">
+                            {row.company}
+                            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                              <div
+                                className="h-full rounded-full bg-indigo-500"
+                                style={{
+                                  width: `${(row.recruited / Math.max(1, ...companyRecruitment.map((item) => item.recruited))) * 100}%`,
+                                }}
+                              />
+                            </div>
+                          </td>
+                          <td className="p-4 text-sm text-slate-600">{row.job}</td>
+                          <td className="p-4 text-sm text-slate-600">{row.recruited}</td>
+                          <td className="p-4 text-sm text-slate-600">{row.offers}</td>
+                          <td className="p-4 text-sm text-slate-600">{row.packageLpa} LPA</td>
+                        </tr>
+                      ))}
+                      {companyRecruitment.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="p-6 text-center text-sm text-slate-500">
+                            No drives yet. Use “+ Add Drive” to add a company and job.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
             </section>
 
             {/* PLACEMENTS */}

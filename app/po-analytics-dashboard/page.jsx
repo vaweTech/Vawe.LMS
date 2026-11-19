@@ -6,7 +6,14 @@ import { useRouter } from "next/navigation";
 import {  BarChart3,  Building2,  Download,  IndianRupee,  Lightbulb,  Pencil,  Plus,  RefreshCw,  TrendingUp,  Users,  Trash2,  UserX,  X,} from "lucide-react";
 import { serverTimestamp, Timestamp } from "firebase/firestore";
 import { auth, db, firestoreHelpers, isFirebaseConfigured } from "../../lib/firebase";
-import { companyKey, csvEscape, subscribeDrives, validateOfferRows } from "@/lib/crtPlacementData";
+import {
+  companyKey,
+  csvEscape,
+  fetchViewerBatchScope,
+  isBatchAssignedToViewer,
+  subscribeDrives,
+  validateOfferRows,
+} from "@/lib/crtPlacementData";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -173,6 +180,16 @@ function normalizeCrtStudent(id, data) {
     0;
 
   const academicYear = String(d.academicYear || d.batchYear || "").trim();
+  const backlogsRaw = d.backlogs ?? d.activeBacklogs ?? d.numberOfBacklogs;
+  const backlogsNum =
+    backlogsRaw === "" || backlogsRaw == null ? null : Number(backlogsRaw);
+  const text = (...keys) => {
+    for (const key of keys) {
+      const value = d[key];
+      if (value != null && String(value).trim()) return String(value).trim();
+    }
+    return "";
+  };
 
   const offerOrActivityTs =
     status === "Placed" ? offerTs || createdTs : createdTs;
@@ -210,16 +227,55 @@ function normalizeCrtStudent(id, data) {
     _academicYear: academicYear,
     offersContribution,
     _studentDocSource: d._studentDocSource,
+    email: text("email"),
+    phone: text("phone1", "phone", "mobile"),
+    phone2: text("phone2"),
+    fatherName: text("fatherName"),
+    gender: text("gender"),
+    dob: text("dob", "dateOfBirth"),
+    college: text("college", "collegeUniversity"),
+    degree: text("degree"),
+    qualification: text("qualification"),
+    yearOfPassing: text("yearOfPassing", "passoutYear", "passOutYear"),
+    skillSet: text("skillSet", "skills"),
+    cgpa: text("cgpa", "percentage", "aggregate"),
+    backlogs: Number.isFinite(backlogsNum) ? backlogsNum : null,
   };
 }
 
+function backlogLabel(value) {
+  return value == null || value === "" ? "—" : String(value);
+}
+
+const STUDENT_PROFILE_FIELDS = [
+  ["name", "Student name"],
+  ["regNo", "Registration number"],
+  ["email", "Email"],
+  ["phone", "Phone"],
+  ["phone2", "Alternate phone"],
+  ["fatherName", "Father name"],
+  ["gender", "Gender"],
+  ["dob", "Date of birth"],
+  ["department", "Branch"],
+  ["degree", "Degree"],
+  ["college", "College"],
+  ["qualification", "Qualification"],
+  ["yearOfPassing", "Year of passing"],
+  ["academicYear", "Academic year"],
+  ["cgpa", "CGPA / percentage"],
+  ["backlogs", "Number of backlogs"],
+  ["skillSet", "Skills"],
+];
+
 /**
- * Student UIDs assigned to a CRT program (`crt/{id}/students`) or to a batch
- * (`crt/{id}/batches/{batchId}/students`). Only these appear on this dashboard.
+ * Students in batches that have a PO assigned.
+ * When `viewer.restrictToSelf` is set, only batches assigned to that PO.
+ * Returns student UIDs plus the batch labels shown on the dashboard.
  */
-async function fetchAssignedCrtStudentIds() {
+async function fetchAssignedCrtStudentIds(viewer) {
   const ids = new Set();
-  if (!db) return ids;
+  const batches = [];
+  if (!db || !viewer) return { ids, batches };
 
   const crtSnap = await firestoreHelpers.getDocs(
     firestoreHelpers.collection(db, "crt")
@@ -228,28 +284,25 @@ async function fetchAssignedCrtStudentIds() {
   await Promise.all(
     crtSnap.docs.map(async (crtDoc) => {
       const programId = crtDoc.id;
-      let crtStSnap;
+      const programName = String(crtDoc.data()?.name || crtDoc.data()?.title || programId).trim();
       let batchesSnap;
       try {
-        [crtStSnap, batchesSnap] = await Promise.all([
-          firestoreHelpers.getDocs(
-            firestoreHelpers.collection(db, "crt", programId, "students")
-          ),
-          firestoreHelpers.getDocs(
-            firestoreHelpers.collection(db, "crt", programId, "batches")
-          ),
-        ]);
+        batchesSnap = await firestoreHelpers.getDocs(
+          firestoreHelpers.collection(db, "crt", programId, "batches")
+        );
       } catch {
         return;
       }
 
-      crtStSnap.docs.forEach((d) => {
-        const sid = d.data()?.studentId;
-        if (sid) ids.add(sid);
-      });
-
       await Promise.all(
         batchesSnap.docs.map(async (batchDoc) => {
+          const batchData = batchDoc.data() || {};
+          if (!isBatchAssignedToViewer(batchData, viewer)) return;
+          const batchName = String(batchData.name || batchDoc.id).trim() || batchDoc.id;
+          batches.push({
+            id: `${programId}::${batchDoc.id}`,
+            label: programName && programName !== batchName ? `${programName} · ${batchName}` : batchName,
+          });
           try {
             const bs = await firestoreHelpers.getDocs(
               firestoreHelpers.collection(
@@ -273,7 +326,8 @@ async function fetchAssignedCrtStudentIds() {
     })
   );
 
-  return ids;
+  batches.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+  return { ids, batches };
 }
 
 /** Load `students/{uid}` or fallback `users/crtStudent/students/{uid}` for each assigned UID. */
@@ -325,12 +379,13 @@ async function fetchCrtStudentProfilesForIds(assignedIds) {
   return merged;
 }
 
-async function fetchCrtStudentsFromFirestore() {
-  const assignedIds = await fetchAssignedCrtStudentIds();
-  const merged = await fetchCrtStudentProfilesForIds(assignedIds);
-  return Array.from(merged.values()).map((row) =>
-    normalizeCrtStudent(row.id, row)
-  );
+async function fetchCrtStudentsFromFirestore(viewer) {
+  const { ids, batches } = await fetchAssignedCrtStudentIds(viewer);
+  const merged = await fetchCrtStudentProfilesForIds(ids);
+  return {
+    students: Array.from(merged.values()).map((row) => normalizeCrtStudent(row.id, row)),
+    batches,
+  };
 }
 
 /** Writes placement fields to the same collection the profile was loaded from. */
@@ -638,6 +693,8 @@ export default function CRTPOAnalyticsDashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState(null);
   const [hasAccess, setHasAccess] = useState(false);
+  const [scope, setScope] = useState(null);
+  const [assignedBatches, setAssignedBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
@@ -656,6 +713,10 @@ export default function CRTPOAnalyticsDashboardPage() {
   const [editOffersLoading, setEditOffersLoading] = useState(false);
   const [placementEditSaving, setPlacementEditSaving] = useState(false);
   const [driveCompanies, setDriveCompanies] = useState([]);
+  const [placementDrives, setPlacementDrives] = useState([]);
+  const [profileStudent, setProfileStudent] = useState(null);
+  const [profileForm, setProfileForm] = useState(null);
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const [filters, setFilters] = useState({
     academicYear: "All",
@@ -673,31 +734,36 @@ export default function CRTPOAnalyticsDashboardPage() {
   }, [allStudents]);
 
   const loadStudents = useCallback(async () => {
-    if (!db || !isFirebaseConfigured) {
+    if (!db || !isFirebaseConfigured || !scope) {
       setAllStudents([]);
+      setAssignedBatches([]);
       setFetchError(null);
       return;
     }
     setDataLoading(true);
     setFetchError(null);
     try {
-      const rows = await fetchCrtStudentsFromFirestore();
-      setAllStudents(rows);
+      const { students, batches } = await fetchCrtStudentsFromFirestore(scope);
+      setAllStudents(students);
+      setAssignedBatches(batches);
       setLastUpdated(new Date());
     } catch (e) {
       console.error(e);
       setFetchError(e?.message || "Failed to load CRT students");
       setAllStudents([]);
+      setAssignedBatches([]);
     } finally {
       setDataLoading(false);
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
 
       if (!u) {
+        setScope(null);
+        setHasAccess(false);
         setLoading(false);
         return;
       }
@@ -711,10 +777,15 @@ export default function CRTPOAnalyticsDashboardPage() {
         firestoreHelpers.doc(db, "users", u.uid)
       );
 
-      const role = snap.exists() ? snap.data().role : null;
-      setHasAccess(
-        ["admin", "superadmin", "collegeAdmin", "crtPoUser", "po", "crtPO"].includes(role)
-      );
+      const profile = snap.exists() ? snap.data() : {};
+      const role = profile.role || null;
+      const allowed = ["admin", "superadmin", "collegeAdmin", "crtPoUser", "po", "crtPO"].includes(role);
+      setHasAccess(allowed);
+      if (allowed) {
+        setScope(await fetchViewerBatchScope(u, role, profile.email));
+      } else {
+        setScope(null);
+      }
       setLoading(false);
     });
 
@@ -725,6 +796,7 @@ export default function CRTPOAnalyticsDashboardPage() {
     if (!user || !hasAccess) return undefined;
     return subscribeDrives(
       (drives) => {
+        setPlacementDrives(drives);
         const byKey = new Map();
         drives.forEach((d) => {
           const key = companyKey(d.companyName);
@@ -861,9 +933,9 @@ export default function CRTPOAnalyticsDashboardPage() {
   }, [editPlacementStudent, editOffersList, loadStudents]);
 
   useEffect(() => {
-    if (!user || !hasAccess || !db || !isFirebaseConfigured) return;
+    if (!user || !hasAccess || !scope || !db || !isFirebaseConfigured) return;
     loadStudents();
-  }, [user, hasAccess, loadStudents]);
+  }, [user, hasAccess, scope, loadStudents]);
 
   const setFilter = (key, value) =>
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -896,7 +968,8 @@ export default function CRTPOAnalyticsDashboardPage() {
   ]);
 
   const filteredStudents = useMemo(() => {
-    if (filters.placementStatus === "All") return cohortStudents;  
+    if (filters.placementStatus === "All") return cohortStudents;
+    return cohortStudents.filter((s) => s.status === filters.placementStatus);
   }, [cohortStudents, filters.placementStatus]);
 
   const placedStudents = useMemo(
@@ -911,6 +984,30 @@ export default function CRTPOAnalyticsDashboardPage() {
 
   const companyRecruitment = useMemo(() => {
     const byCompany = new Map();
+    const ensure = (name) => {
+      const key = companyKey(name);
+      if (!key) return null;
+      if (!byCompany.has(key)) {
+        byCompany.set(key, {
+          company: String(name).trim(),
+          jobs: new Set(),
+          packages: [],
+          drivePackage: 0,
+          recruited: 0,
+          offers: 0,
+          seenStudents: new Set(),
+        });
+      }
+      return byCompany.get(key);
+    };
+
+    placementDrives.forEach((drive) => {
+      const entry = ensure(drive.companyName);
+      if (!entry) return;
+      if (drive.role) entry.jobs.add(drive.role);
+      if (drive.packageLpa > entry.drivePackage) entry.drivePackage = drive.packageLpa;
+    });
+
     cohortStudents
       .filter((s) => s.status === "Placed")
       .forEach((s) => {
@@ -920,36 +1017,32 @@ export default function CRTPOAnalyticsDashboardPage() {
             : s.company && s.company !== "—"
               ? [{ company: s.company, packageLpa: s.packageLpa }]
               : [];
-        const seenForStudent = new Set();
         rows.forEach((o) => {
-          const c = o.company;
-          if (!c || c === "—") return;
-          if (!byCompany.has(c)) {
-            byCompany.set(c, { packages: [], recruited: 0, offers: 0 });
-          }
-          const entry = byCompany.get(c);
+          const entry = ensure(o.company);
+          if (!entry) return;
           entry.offers += 1;
           if (o.packageLpa > 0) entry.packages.push(o.packageLpa);
-          if (!seenForStudent.has(c)) {
-            seenForStudent.add(c);
+          if (!entry.seenStudents.has(s.id)) {
+            entry.seenStudents.add(s.id);
             entry.recruited += 1;
           }
         });
       });
-    return Array.from(byCompany.entries())
-      .map(([company, v]) => ({
-        company,
+    return Array.from(byCompany.values())
+      .map((v) => ({
+        company: v.company,
+        job: v.jobs.size ? [...v.jobs].join(", ") : "—",
         recruited: v.recruited,
         offers: v.offers,
         avgPackageLpa:
           v.packages.length > 0
-            ? (
-                v.packages.reduce((a, b) => a + b, 0) / v.packages.length
-              ).toFixed(1)
-            : "0.0",
+            ? (v.packages.reduce((a, b) => a + b, 0) / v.packages.length).toFixed(1)
+            : v.drivePackage > 0
+              ? v.drivePackage.toFixed(1)
+              : "0.0",
       }))
-      .sort((a, b) => b.offers - a.offers);
-  }, [cohortStudents]);
+      .sort((a, b) => b.offers - a.offers || a.company.localeCompare(b.company));
+  }, [cohortStudents, placementDrives]);
 
   /**
    * Last 6 months: bars = placed student count/month; line = sum of offers (offersCount… on doc, else 1/student).
@@ -1076,14 +1169,107 @@ export default function CRTPOAnalyticsDashboardPage() {
     }
   };
 
+  const openStudentProfile = (student) => {
+    setProfileStudent(student);
+    setProfileForm({
+      name: student.name === "—" ? "" : student.name,
+      regNo: student.regNo === "—" ? "" : student.regNo,
+      email: student.email || "",
+      phone: student.phone || "",
+      phone2: student.phone2 || "",
+      fatherName: student.fatherName || "",
+      gender: student.gender || "",
+      dob: student.dob || "",
+      department: student.department || "",
+      degree: student.degree || "",
+      college: student.college || "",
+      qualification: student.qualification || "",
+      yearOfPassing: student.yearOfPassing || "",
+      academicYear: student._academicYear || "",
+      cgpa: student.cgpa || "",
+      backlogs: student.backlogs == null ? "" : String(student.backlogs),
+      skillSet: student.skillSet || "",
+    });
+  };
+
+  const submitStudentProfile = useCallback(async () => {
+    const student = profileStudent;
+    if (!student?.id || !profileForm) return;
+    const name = String(profileForm.name || "").trim();
+    if (!name) {
+      alert("Student name is required.");
+      return;
+    }
+    const email = String(profileForm.email || "").trim().toLowerCase();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      alert("Enter a valid email address.");
+      return;
+    }
+    const backlogsText = String(profileForm.backlogs ?? "").trim();
+    let backlogs = null;
+    if (backlogsText !== "") {
+      if (!/^\d+$/.test(backlogsText) || Number(backlogsText) > 50) {
+        alert("Number of backlogs must be a whole number from 0 to 50.");
+        return;
+      }
+      backlogs = Number(backlogsText);
+    }
+    setProfileSaving(true);
+    try {
+      await updateStudentPlacementFirestore(student.id, student._studentDocSource, {
+        name,
+        studentName: name,
+        regdNo: String(profileForm.regNo || "").trim(),
+        regNo: String(profileForm.regNo || "").trim(),
+        email,
+        phone: String(profileForm.phone || "").trim(),
+        phone1: String(profileForm.phone || "").trim(),
+        phone2: String(profileForm.phone2 || "").trim(),
+        fatherName: String(profileForm.fatherName || "").trim(),
+        gender: String(profileForm.gender || "").trim(),
+        dob: String(profileForm.dob || "").trim(),
+        branch: String(profileForm.department || "").trim(),
+        department: String(profileForm.department || "").trim(),
+        college: String(profileForm.college || "").trim(),
+        degree: String(profileForm.degree || "").trim(),
+        qualification: String(profileForm.qualification || "").trim(),
+        yearOfPassing: String(profileForm.yearOfPassing || "").trim(),
+        academicYear: String(profileForm.academicYear || "").trim(),
+        skillSet: String(profileForm.skillSet || "").trim(),
+        cgpa: String(profileForm.cgpa || "").trim(),
+        backlogs,
+        activeBacklogs: backlogs,
+        numberOfBacklogs: backlogs,
+      });
+      setProfileStudent(null);
+      setProfileForm(null);
+      await loadStudents();
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to save student details");
+    } finally {
+      setProfileSaving(false);
+    }
+  }, [profileStudent, profileForm, loadStudents]);
+
   const handleExport = () => {
     const csv = [
-      "RegNo,Name,Department,Status,Company,PackageLPA,OfferDate",
-      ...filteredStudents.map(
-        ({ regNo, name, department, status, company, packageLpa, offerDate }) =>
-          [regNo, name, department, status, company, packageLpa, offerDate]
-            .map(csvEscape)
-            .join(",")
+      "RegNo,Name,Department,Email,Phone,Backlogs,Status,Company,PackageLPA,OfferDate",
+      ...filteredStudents.map((s) =>
+        [
+          s.regNo,
+          s.name,
+          s.department,
+          s.email,
+          s.phone,
+          s.backlogs ?? "",
+          s.status,
+          s.company,
+          s.packageLpa,
+          s.offerDate,
+        ]
+          .map(csvEscape)
+          .join(",")
       ),
     ].join("\n");
 
@@ -1158,8 +1344,22 @@ export default function CRTPOAnalyticsDashboardPage() {
                   CRT PO Analytics Dashboard
                 </h1>
                 <p className="text-sm sm:text-base text-slate-600 mt-1">
-                  Placement performance and hiring insights for CRT PO module.
+                  {scope?.restrictToSelf
+                    ? "Placement insights for the batches assigned to you."
+                    : "Placement insights for batches that have a placement officer assigned."}
                 </p>
+                {assignedBatches.length > 0 && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    Assigned batches: {assignedBatches.map((b) => b.label).join(", ")}
+                  </p>
+                )}
+                {!dataLoading && assignedBatches.length === 0 && (
+                  <p className="text-xs text-amber-700 mt-2">
+                    {scope?.restrictToSelf
+                      ? "No batches are assigned to you yet."
+                      : "No batches have a placement officer assigned yet."}
+                  </p>
+                )}
                 <p className="text-xs text-slate-500 mt-2">
                   Last updated: {lastUpdated.toLocaleString()}
                   {dataLoading ? " · Loading…" : ""}
@@ -1372,7 +1572,7 @@ export default function CRTPOAnalyticsDashboardPage() {
         <div className="mt-6">
           <TableSection
             title="Company-wise Recruitment"
-            headers={["Company", "Students Recruited", "Offers Made", "Avg Package"]}
+            headers={["Company", "Job", "Students Recruited", "Offers Made", "Avg Package"]}
             rows={companyRecruitment}
             renderRow={(c) => (
               <tr
@@ -1382,6 +1582,7 @@ export default function CRTPOAnalyticsDashboardPage() {
                 <td className="p-3 text-sm text-slate-900 font-medium">
                   {c.company}
                 </td>
+                <td className="p-3 text-sm text-slate-600">{c.job}</td>
                 <td className="p-3 text-sm text-slate-600">{c.recruited}</td>
                 <td className="p-3 text-sm text-slate-600">{c.offers}</td>
                 <td className="p-3 text-sm text-slate-600">
@@ -1401,6 +1602,7 @@ export default function CRTPOAnalyticsDashboardPage() {
               "Reg No",
               "Name",
               "Dept",
+              "Backlogs",
               "Company (primary)",
               "Package",
               "Offers",
@@ -1417,6 +1619,7 @@ export default function CRTPOAnalyticsDashboardPage() {
                   {s.name}
                 </td>
                 <td className="p-3 text-sm text-slate-600">{s.department}</td>
+                <td className="p-3 text-sm text-slate-600 tabular-nums">{backlogLabel(s.backlogs)}</td>
                 <td className="p-3 text-sm text-slate-600">{s.company}</td>
                 <td className="p-3 text-sm text-slate-600">
                   {s.packageLpa > 0 ? `${s.packageLpa} LPA` : "—"}
@@ -1426,6 +1629,14 @@ export default function CRTPOAnalyticsDashboardPage() {
                 </td>
                 <td className="p-3 text-sm">
                   <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={profileSaving}
+                      onClick={() => openStudentProfile(s)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Details
+                    </button>
                     <button
                       type="button"
                       disabled={
@@ -1483,7 +1694,7 @@ export default function CRTPOAnalyticsDashboardPage() {
 
           <TableSection
             title="Unplaced Students"
-            headers={["Reg No", "Name", "Dept", "Status", "Action"]}
+            headers={["Reg No", "Name", "Dept", "Backlogs", "Status", "Action"]}
             rows={unplacedStudents}
             renderRow={(s) => (
               <tr
@@ -1495,12 +1706,22 @@ export default function CRTPOAnalyticsDashboardPage() {
                   {s.name}
                 </td>
                 <td className="p-3 text-sm text-slate-600">{s.department}</td>
+                <td className="p-3 text-sm text-slate-600 tabular-nums">{backlogLabel(s.backlogs)}</td>
                 <td className="p-3 text-sm">
                   <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-0.5 text-rose-700 text-xs font-medium">
                     Unplaced
                   </span>
                 </td>
                 <td className="p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={profileSaving}
+                    onClick={() => openStudentProfile(s)}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Details
+                  </button>
                   <button
                     type="button"
                     disabled={markingPlacedId === s.id}
@@ -1509,6 +1730,7 @@ export default function CRTPOAnalyticsDashboardPage() {
                   >
                     {markingPlacedId === s.id ? "Saving…" : "Mark as placed"}
                   </button>
+                  </div>
                 </td>
               </tr>
             )}
@@ -1563,6 +1785,89 @@ export default function CRTPOAnalyticsDashboardPage() {
             ))}
           </div>
         </Card>
+
+        {profileStudent && profileForm && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="student-profile-title"
+          >
+            <div className="relative w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+              <button
+                type="button"
+                className="absolute right-4 top-4 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                onClick={() => {
+                  if (profileSaving) return;
+                  setProfileStudent(null);
+                  setProfileForm(null);
+                }}
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              <h3 id="student-profile-title" className="text-lg font-semibold text-slate-900 pr-8">
+                Student details
+              </h3>
+              <p className="mt-1 text-sm text-slate-500">
+                {profileStudent.name} · {profileStudent.regNo} · {profileStudent.status}
+              </p>
+              <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {STUDENT_PROFILE_FIELDS.map(([key, label]) => (
+                  <div key={key} className={key === "skillSet" ? "sm:col-span-2" : ""}>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">{label}</label>
+                    {key === "skillSet" ? (
+                      <textarea
+                        value={profileForm[key]}
+                        disabled={profileSaving}
+                        rows={3}
+                        onChange={(e) =>
+                          setProfileForm((form) => ({ ...form, [key]: e.target.value }))
+                        }
+                        className="w-full rounded-2xl border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
+                      />
+                    ) : (
+                      <input
+                        type={key === "backlogs" ? "number" : key === "email" ? "email" : "text"}
+                        inputMode={key === "backlogs" ? "numeric" : undefined}
+                        min={key === "backlogs" ? 0 : undefined}
+                        max={key === "backlogs" ? 50 : undefined}
+                        step={key === "backlogs" ? 1 : undefined}
+                        value={profileForm[key]}
+                        disabled={profileSaving}
+                        onChange={(e) =>
+                          setProfileForm((form) => ({ ...form, [key]: e.target.value }))
+                        }
+                        className="w-full rounded-2xl border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#00448a]/30 focus:border-[#00448a]"
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-6 flex gap-3 justify-end">
+                <button
+                  type="button"
+                  disabled={profileSaving}
+                  className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  onClick={() => {
+                    setProfileStudent(null);
+                    setProfileForm(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={profileSaving}
+                  onClick={submitStudentProfile}
+                  className="rounded-2xl bg-[#00448a] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#003a76] disabled:opacity-50"
+                >
+                  {profileSaving ? "Saving…" : "Save details"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {offerModalStudent && (
           <div

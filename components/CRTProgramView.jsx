@@ -8,6 +8,7 @@ import { createSlug } from "../lib/urlUtils";
 import { collection, getDocs, getDoc, doc, onSnapshot } from "firebase/firestore";
 import MyCrtProgressCard, { useMyCrtEnrollments } from "./crt/MyCrtProgress";
 import MyClassPanels from "./crt/MyClassPanels";
+import CrtFaceAttendance from "./crt/CrtFaceAttendance";
 import { crtCourseUrlSegment, isCourseVisibleToAnyBatch } from "../lib/crtCourseFork";
 
 export default function CRTProgramView({ user, profile, setProfile, showBackToDashboard, studentDocId }) {
@@ -205,7 +206,12 @@ export default function CRTProgramView({ user, profile, setProfile, showBackToDa
                 Finding your programme…
               </div>
             ) : enrollments.length > 0 ? (
-              enrollments.map((e) => <MyCrtProgressCard key={e.crtId} user={user} enrollment={e} />)
+              enrollments.map((e) => (
+                <div key={e.crtId} className="space-y-4 sm:space-y-6">
+                  <CrtFaceAttendance user={user} crtId={e.crtId} />
+                  <MyCrtProgressCard user={user} enrollment={e} />
+                </div>
+              ))
             ) : (
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
                 You are not assigned to a CRT programme or batch yet. Contact your placement coordinator.

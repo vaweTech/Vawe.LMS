@@ -33,12 +33,13 @@ export default function LoginCardShell({
         <div className="flex flex-col md:flex-row">
           <div className="flex items-center justify-center p-8 md:w-[42%] md:p-10 lg:p-12">
             <Image
-              src="/vawe-emblem.png"
+              src="/vawe-emblem-nav.png"
               alt="VAWE - Value Added Work for Empowerment"
-              width={723}
-              height={684}
-              className="h-auto w-[min(280px,70vw)] object-contain"
+              width={743}
+              height={768}
+              className="h-auto w-[min(300px,72vw)] object-contain drop-shadow-sm"
               priority
+              unoptimized
             />
           </div>
 

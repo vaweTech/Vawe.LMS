@@ -7,6 +7,7 @@ import { auth, db, firestoreHelpers } from "../../lib/firebase";
 import { createSlug } from "../../lib/urlUtils";
 import { tenantSegments } from "@/lib/tenantPath";
 import { CrtProgrammeStrip, useMyCrtEnrollments } from "@/components/crt/MyCrtProgress";
+import CrtFaceAttendance from "@/components/crt/CrtFaceAttendance";
 import {
   CodeBracketIcon,
   CpuChipIcon,
@@ -115,6 +116,9 @@ export default function CRTPage() {
         {/* Program blocks */}
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12 sm:py-16 space-y-8 sm:space-y-10">
           <CrtProgrammeStrip user={user} />
+          {enrollments.map((e) => (
+            <CrtFaceAttendance key={e.crtId} user={user} crtId={e.crtId} />
+          ))}
           {loading && (
             <div className="text-center py-12 text-slate-500">Loading programmes...</div>
           )}

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Cpu, Layers, FileCheck, ChartBar, ArrowLeft, Users, UserCog, UserCheck, UserPlus, Briefcase, TrendingUp, CalendarCheck } from "lucide-react";
+import { Cpu, Layers, FileCheck, ChartBar, ArrowLeft, Users, UserCog, UserCheck, UserPlus, Briefcase, TrendingUp, CalendarCheck, ScanFace } from "lucide-react";
 import { useAdminAccess } from "../AdminAccessContext";
 
 export default function CRTDashboardPage() {
@@ -73,6 +73,13 @@ export default function CRTDashboardPage() {
       title: "Class Attendance",
       description: "Daily, batch-wise and student-wise attendance marked by trainers.",
       color: "from-lime-500 to-green-600",
+    },
+    {
+      href: "/Admin/crt/frs",
+      icon: ScanFace,
+      title: "Face Attendance (FRS)",
+      description: "Set each batch's check-in location and radius, review face registrations and check-ins.",
+      color: "from-sky-500 to-cyan-600",
     },
     {
       href: "/Admin/crt/student-user-management",

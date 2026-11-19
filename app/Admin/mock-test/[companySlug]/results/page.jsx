@@ -24,9 +24,11 @@ import { ResultsPageSkeleton } from "@/components/PageSkeleton";
 import {
   ArrowLeft,
   BarChart3,
+  Code2,
   Download,
   MessageCircle,
   Search,
+  Target,
   Trash2,
   Trophy,
   Users,
@@ -72,9 +74,38 @@ function scoreTone(percent) {
 function ScoreBadge({ value }) {
   const num = Number(value) || 0;
   return (
-    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${scoreTone(num)}`}>
+    <span className={`inline-flex rounded-lg px-2.5 py-0.5 text-xs font-semibold ${scoreTone(num)}`}>
       {Math.round(num)}%
     </span>
+  );
+}
+
+function ProgressBar({ value, tone = "bg-[#00448a]" }) {
+  const pct = Math.max(0, Math.min(100, Number(value) || 0));
+  return (
+    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+      <div className={`h-full rounded-full ${tone}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function Panel({ children, className = "" }) {
+  return (
+    <div className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+function PanelHeader({ title, subtitle, action }) {
+  return (
+    <div className="flex flex-col gap-2 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+        {subtitle ? <p className="mt-0.5 text-sm text-slate-500">{subtitle}</p> : null}
+      </div>
+      {action}
+    </div>
   );
 }
 
@@ -704,309 +735,443 @@ function ResultsInner() {
   }
 
   const selectedTest = tests.find((t) => t.id === testFilter);
+  const filterSelectClass =
+    "rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#00448a]/25 focus:border-[#00448a]";
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8">
-      <div className="max-w-6xl mx-auto">
+    <div className="min-h-screen bg-[linear-gradient(180deg,#eef4fb_0%,#f8fafc_28%,#f8fafc_100%)]">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
         <Link
           href={`/Admin/mock-test/${companySlug}`}
-          className="inline-flex items-center gap-2 text-sm text-[#00448a] hover:underline mb-5"
+          className="mb-5 inline-flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-sm font-medium text-slate-700 ring-1 ring-slate-200 hover:bg-white"
         >
           <ArrowLeft className="h-4 w-4" />
           Back to tests
         </Link>
 
-        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-6">
-          <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-xl bg-[#00448a] text-white flex items-center justify-center">
-              <BarChart3 className="h-6 w-6" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Results & analytics</h1>
-              <p className="text-sm text-slate-600">
-                {groupLabel || companySlug}
-                {selectedTest ? ` · ${selectedTest.title}` : " · all tests"}
-              </p>
+        <Panel className="mb-6 overflow-hidden">
+          <div className="bg-[linear-gradient(135deg,#00448a_0%,#0b6bcb_55%,#0891b2_100%)] px-5 py-6 text-white sm:px-7 sm:py-7">
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-100">
+                  Mock test analytics
+                </p>
+                <h1 className="mt-2 text-xl font-bold leading-tight sm:text-2xl lg:text-[1.65rem] xl:text-3xl">
+                  {groupLabel || companySlug}
+                </h1>
+                <p className="mt-2 max-w-2xl text-xs text-sky-50/90 sm:text-sm">
+                  {selectedTest
+                    ? `Showing results for ${selectedTest.title}`
+                    : "Showing results across every test in this group"}
+                  {" · "}pass mark {PASS_MARK}%
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => sendWhatsAppResults(rows)}
+                  disabled={!rows.length || waSending || !!waSendingRowKey}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 sm:px-4 sm:py-2.5 sm:text-sm"
+                >
+                  <MessageCircle className="h-4 w-4 shrink-0" />
+                  {waSending ? "Sending…" : "Send WhatsApp"}
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadExcel}
+                  disabled={!rows.length}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl bg-white/15 px-3 py-2 text-xs font-semibold text-white ring-1 ring-white/40 hover:bg-white/25 disabled:opacity-50 sm:px-4 sm:py-2.5 sm:text-sm"
+                >
+                  <Download className="h-4 w-4 shrink-0" />
+                  Download Excel
+                </button>
+              </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => sendWhatsAppResults(rows)}
-              disabled={!rows.length || waSending || !!waSendingRowKey}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
-            >
-              <MessageCircle className="h-4 w-4" />
-              {waSending ? "Sending…" : "Send WhatsApp"}
-            </button>
-            <button
-              type="button"
-              onClick={downloadExcel}
-              disabled={!rows.length}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76] disabled:opacity-50"
-            >
-              <Download className="h-4 w-4" />
-              Download Excel
-            </button>
-          </div>
-        </div>
 
-        <div className="flex flex-wrap gap-3 mb-6">
-          <select
-            value={testFilter}
-            onChange={(e) => setTestFilter(e.target.value)}
-            className="border rounded-lg px-3 py-2 text-sm bg-white"
-          >
-            <option value="all">All tests</option>
-            {tests.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.title || t.id}
-              </option>
-            ))}
-          </select>
-          <div className="relative flex-1 min-w-[220px]">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by name, email, or test"
-              className="w-full border rounded-lg pl-9 pr-9 py-2 text-sm bg-white"
-            />
-            {search ? (
-              <button
-                type="button"
-                onClick={() => setSearch("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-slate-700"
-                title="Clear search"
+          <div className="grid gap-3 border-t border-slate-100 p-4 sm:grid-cols-2 lg:grid-cols-12">
+            <div className="lg:col-span-4">
+              <label className="mb-1.5 block text-xs font-semibold text-slate-500">Test</label>
+              <select
+                value={testFilter}
+                onChange={(e) => setTestFilter(e.target.value)}
+                className={`w-full ${filterSelectClass}`}
               >
-                <X className="h-4 w-4" />
-              </button>
-            ) : null}
+                <option value="all">All tests</option>
+                {tests.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.title || t.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="lg:col-span-5">
+              <label className="mb-1.5 block text-xs font-semibold text-slate-500">Search</label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by name, email, or test"
+                  className={`w-full pl-9 pr-9 ${filterSelectClass}`}
+                />
+                {search ? (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700"
+                    title="Clear search"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <div className="lg:col-span-3">
+              <label className="mb-1.5 block text-xs font-semibold text-slate-500">Sort</label>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className={`w-full ${filterSelectClass}`}
+              >
+                <option value="recent">Newest first</option>
+                <option value="scoreDesc">Highest score</option>
+                <option value="scoreAsc">Lowest score</option>
+                <option value="name">Name A–Z</option>
+              </select>
+            </div>
           </div>
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
-            className="border rounded-lg px-3 py-2 text-sm bg-white"
-          >
-            <option value="recent">Newest first</option>
-            <option value="scoreDesc">Highest score</option>
-            <option value="scoreAsc">Lowest score</option>
-            <option value="name">Name A–Z</option>
-          </select>
-        </div>
+        </Panel>
 
         {loading ? (
           <ResultsPageSkeleton />
         ) : submissions.length === 0 ? (
-          <div className="p-8 text-center text-slate-500 bg-white rounded-2xl border">
-            No submissions yet. Results appear after a student finishes and submits.
-          </div>
+          <Panel className="px-6 py-16 text-center">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
+              <BarChart3 className="h-6 w-6" />
+            </div>
+            <h2 className="text-lg font-semibold text-slate-900">No submissions yet</h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Results appear here after a student finishes and submits a mock test.
+            </p>
+          </Panel>
         ) : rows.length === 0 ? (
-          <div className="p-8 text-center text-slate-500 bg-white rounded-2xl border">
-            No results match “{search || "this filter"}”.
-          </div>
+          <Panel className="px-6 py-16 text-center">
+            <h2 className="text-lg font-semibold text-slate-900">No matching results</h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Nothing matches “{search || "this filter"}”. Try another test or clear search.
+            </p>
+          </Panel>
         ) : (
           <>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+            <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
               {[
-                { label: "Attempts", value: stats.attempts, icon: Users },
-                { label: "Students", value: stats.uniqueStudents, icon: Users },
-                { label: "Average score", value: `${Math.round(stats.avgScore)}%`, icon: BarChart3 },
-                { label: `Pass rate (≥${PASS_MARK}%)`, value: `${Math.round(stats.passRate)}%`, icon: Trophy },
-              ].map(({ label, value, icon: Icon }) => (
-                <div key={label} className="bg-white rounded-2xl border border-slate-200 p-4">
-                  <div className="flex items-center gap-2 text-slate-500 text-xs font-medium">
-                    <Icon className="h-4 w-4" />
-                    {label}
+                {
+                  label: "Attempts",
+                  value: stats.attempts,
+                  hint: `${stats.uniqueStudents} unique student${stats.uniqueStudents === 1 ? "" : "s"}`,
+                  icon: Users,
+                  tone: "text-[#00448a]",
+                  bg: "bg-sky-50",
+                },
+                {
+                  label: "Average score",
+                  value: `${Math.round(stats.avgScore)}%`,
+                  hint: `High ${Math.round(stats.highest)}% · Low ${Math.round(stats.lowest)}%`,
+                  icon: Target,
+                  tone: "text-cyan-700",
+                  bg: "bg-cyan-50",
+                },
+                {
+                  label: `Pass rate`,
+                  value: `${Math.round(stats.passRate)}%`,
+                  hint: `At or above ${PASS_MARK}%`,
+                  icon: Trophy,
+                  tone: "text-emerald-700",
+                  bg: "bg-emerald-50",
+                },
+                {
+                  label: "MCQ / Coding",
+                  value: `${Math.round(stats.avgMcq)}%`,
+                  hint: `Coding avg ${Math.round(stats.avgCoding)}%`,
+                  icon: Code2,
+                  tone: "text-slate-800",
+                  bg: "bg-slate-100",
+                },
+              ].map(({ label, value, hint, icon: Icon, tone, bg }) => (
+                <Panel key={label} className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        {label}
+                      </p>
+                      <p className={`mt-2 text-3xl font-bold ${tone}`}>{value}</p>
+                      <p className="mt-2 text-xs text-slate-500">{hint}</p>
+                    </div>
+                    <div className={`rounded-xl p-2.5 ${bg}`}>
+                      <Icon className={`h-5 w-5 ${tone}`} />
+                    </div>
                   </div>
-                  <p className="text-2xl font-bold text-slate-900 mt-1">{value}</p>
-                </div>
+                </Panel>
               ))}
             </div>
 
-            <div className="grid lg:grid-cols-2 gap-4 mb-6">
-              <div className="bg-white rounded-2xl border border-slate-200 p-4">
-                <h2 className="font-semibold text-slate-900 mb-3">Score distribution</h2>
-                <div className="h-[224px] w-full min-w-0">
-                  <ResponsiveContainer width="100%" height={224} minWidth={0} minHeight={0}>
-                    <BarChart data={distribution}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                      <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-                      <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
-                      <Tooltip />
-                      <Bar dataKey="count" radius={[6, 6, 0, 0]}>
-                        {distribution.map((d) => (
-                          <Cell key={d.key} fill={d.fill} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+            <div className="mb-6 grid gap-4 lg:grid-cols-2">
+              <Panel>
+                <PanelHeader
+                  title="Score distribution"
+                  subtitle="How many attempts fall in each score band"
+                />
+                <div className="p-4">
+                  <div className="h-[240px] w-full min-w-0">
+                    <ResponsiveContainer width="100%" height={240} minWidth={0} minHeight={0}>
+                      <BarChart data={distribution}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#64748b" }} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 12, fill: "#64748b" }} />
+                        <Tooltip />
+                        <Bar dataKey="count" radius={[8, 8, 0, 0]}>
+                          {distribution.map((d) => (
+                            <Cell key={d.key} fill={d.fill} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {distribution.map((d) => (
+                      <div key={d.key} className="rounded-xl bg-slate-50 px-3 py-2 text-center">
+                        <p className="text-[11px] font-medium text-slate-500">{d.label}</p>
+                        <p className="mt-0.5 text-sm font-bold text-slate-900">{d.count}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div className="bg-white rounded-2xl border border-slate-200 p-4">
-                <h2 className="font-semibold text-slate-900 mb-3">Performance snapshot</h2>
-                <dl className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded-xl bg-slate-50 p-3">
-                    <dt className="text-slate-500">Highest</dt>
-                    <dd className="text-lg font-bold text-emerald-700">{Math.round(stats.highest)}%</dd>
-                  </div>
-                  <div className="rounded-xl bg-slate-50 p-3">
-                    <dt className="text-slate-500">Lowest</dt>
-                    <dd className="text-lg font-bold text-rose-700">{Math.round(stats.lowest)}%</dd>
-                  </div>
-                  <div className="rounded-xl bg-blue-50 p-3">
-                    <dt className="text-slate-500">Avg MCQ</dt>
-                    <dd className="text-lg font-bold text-blue-800">{Math.round(stats.avgMcq)}%</dd>
-                  </div>
-                  <div className="rounded-xl bg-violet-50 p-3">
-                    <dt className="text-slate-500">Avg coding</dt>
-                    <dd className="text-lg font-bold text-violet-800">{Math.round(stats.avgCoding)}%</dd>
-                  </div>
-                </dl>
-                {perTest.length > 0 && (
-                  <div className="mt-4">
-                    <p className="text-xs font-semibold uppercase text-slate-500 mb-2">By test</p>
-                    <div className="space-y-2 max-h-36 overflow-auto">
-                      {perTest.map((t) => (
-                        <div key={t.testId} className="flex items-center justify-between text-sm gap-2">
-                          <span className="truncate">{t.title}</span>
-                          <span className="shrink-0 text-slate-600">
-                            {t.count} · {Math.round(t.avg)}%
-                          </span>
-                        </div>
-                      ))}
+              </Panel>
+
+              <Panel>
+                <PanelHeader
+                  title="Performance snapshot"
+                  subtitle="Range and average by question type"
+                />
+                <div className="space-y-4 p-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4">
+                      <p className="text-xs font-semibold text-emerald-700">Highest</p>
+                      <p className="mt-1 text-2xl font-bold text-emerald-800">
+                        {Math.round(stats.highest)}%
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-rose-100 bg-rose-50/70 p-4">
+                      <p className="text-xs font-semibold text-rose-700">Lowest</p>
+                      <p className="mt-1 text-2xl font-bold text-rose-800">
+                        {Math.round(stats.lowest)}%
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-sky-100 bg-sky-50/70 p-4">
+                      <p className="text-xs font-semibold text-sky-700">Avg MCQ</p>
+                      <p className="mt-1 text-2xl font-bold text-sky-900">
+                        {Math.round(stats.avgMcq)}%
+                      </p>
+                      <div className="mt-3">
+                        <ProgressBar value={stats.avgMcq} tone="bg-sky-500" />
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <p className="text-xs font-semibold text-slate-600">Avg coding</p>
+                      <p className="mt-1 text-2xl font-bold text-slate-900">
+                        {Math.round(stats.avgCoding)}%
+                      </p>
+                      <div className="mt-3">
+                        <ProgressBar value={stats.avgCoding} tone="bg-slate-700" />
+                      </div>
                     </div>
                   </div>
-                )}
-              </div>
+
+                  {perTest.length > 0 && (
+                    <div>
+                      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        By test
+                      </p>
+                      <div className="max-h-40 space-y-2 overflow-auto pr-1">
+                        {perTest.map((t) => (
+                          <div
+                            key={t.testId}
+                            className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2.5"
+                          >
+                            <div className="mb-1.5 flex items-center justify-between gap-2 text-sm">
+                              <span className="truncate font-medium text-slate-800">{t.title}</span>
+                              <span className="shrink-0 text-slate-500">
+                                {t.count} · {Math.round(t.avg)}%
+                              </span>
+                            </div>
+                            <ProgressBar value={t.avg} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Panel>
             </div>
 
             {sectionAnalytics.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-6">
-                <h2 className="font-semibold text-slate-900 mb-1">Section-wise scores</h2>
-                <p className="text-xs text-slate-500 mb-3">Average score, total marks, and accuracy by section</p>
-                <div className="h-[224px] w-full min-w-0 mb-4">
-                  <ResponsiveContainer width="100%" height={224} minWidth={0} minHeight={0}>
-                    <BarChart data={sectionAnalytics}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                      <XAxis dataKey="section" tick={{ fontSize: 12 }} interval={0} />
-                      <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
-                      <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
-                      <Bar dataKey="percent" fill="#00448a" radius={[6, 6, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-slate-500">
-                        <th className="py-2">Section</th>
-                        <th className="py-2 text-center">Score</th>
-                        <th className="py-2 text-center">Total</th>
-                        <th className="py-2 text-right">Avg %</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sectionAnalytics.map((s) => (
-                        <tr key={s.section} className="border-t">
-                          <td className="py-2 font-medium">{s.section}</td>
-                          <td className="py-2 text-center">{Math.round(s.earned)}</td>
-                          <td className="py-2 text-center">{Math.round(s.max)}</td>
-                          <td className="py-2 text-right">
-                            <ScoreBadge value={s.percent} />
-                          </td>
+              <Panel className="mb-6">
+                <PanelHeader
+                  title="Section-wise scores"
+                  subtitle="Average score, total marks, and accuracy by section"
+                />
+                <div className="p-4">
+                  <div className="mb-4 h-[224px] w-full min-w-0">
+                    <ResponsiveContainer width="100%" height={224} minWidth={0} minHeight={0}>
+                      <BarChart data={sectionAnalytics}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis dataKey="section" tick={{ fontSize: 12, fill: "#64748b" }} interval={0} />
+                        <YAxis domain={[0, 100]} tick={{ fontSize: 12, fill: "#64748b" }} />
+                        <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
+                        <Bar dataKey="percent" fill="#00448a" radius={[8, 8, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-slate-500">
+                          <th className="pb-2 font-semibold">Section</th>
+                          <th className="pb-2 text-center font-semibold">Score</th>
+                          <th className="pb-2 text-center font-semibold">Total</th>
+                          <th className="pb-2 font-semibold">Progress</th>
+                          <th className="pb-2 text-right font-semibold">Avg %</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {sectionAnalytics.map((s) => (
+                          <tr key={s.section} className="border-t border-slate-100">
+                            <td className="py-3 font-medium text-slate-900">{s.section}</td>
+                            <td className="py-3 text-center text-slate-700">{Math.round(s.earned)}</td>
+                            <td className="py-3 text-center text-slate-700">{Math.round(s.max)}</td>
+                            <td className="py-3 min-w-[120px]">
+                              <ProgressBar value={s.percent} />
+                            </td>
+                            <td className="py-3 text-right">
+                              <ScoreBadge value={s.percent} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              </Panel>
             )}
 
             {subSectionAnalytics.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-6">
-                <h2 className="font-semibold text-slate-900 mb-1">Sub-section-wise scores</h2>
-                <p className="text-xs text-slate-500 mb-3">
-                  Score / total / % for each sub-section inside a section
-                </p>
-                <div className="h-[240px] w-full min-w-0 mb-4">
-                  <ResponsiveContainer width="100%" height={240} minWidth={0} minHeight={0}>
-                    <BarChart data={subSectionAnalytics}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                      <XAxis
-                        dataKey="label"
-                        tick={{ fontSize: 11 }}
-                        interval={0}
-                        angle={-20}
-                        textAnchor="end"
-                        height={60}
-                      />
-                      <YAxis domain={[0, 100]} tick={{ fontSize: 12 }} />
-                      <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
-                      <Bar dataKey="percent" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-slate-500">
-                        <th className="py-2">Section</th>
-                        <th className="py-2">Sub-section</th>
-                        <th className="py-2 text-center">Score</th>
-                        <th className="py-2 text-center">Total</th>
-                        <th className="py-2 text-right">Avg %</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {subSectionAnalytics.map((s) => (
-                        <tr key={s.key} className="border-t">
-                          <td className="py-2 font-medium">{s.section}</td>
-                          <td className="py-2 text-slate-700">{s.subSection}</td>
-                          <td className="py-2 text-center">{Math.round(s.earned)}</td>
-                          <td className="py-2 text-center">{Math.round(s.max)}</td>
-                          <td className="py-2 text-right">
-                            <ScoreBadge value={s.percent} />
-                          </td>
+              <Panel className="mb-6">
+                <PanelHeader
+                  title="Sub-section-wise scores"
+                  subtitle="Score / total / % for each sub-section inside a section"
+                />
+                <div className="p-4">
+                  <div className="mb-4 h-[240px] w-full min-w-0">
+                    <ResponsiveContainer width="100%" height={240} minWidth={0} minHeight={0}>
+                      <BarChart data={subSectionAnalytics}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis
+                          dataKey="label"
+                          tick={{ fontSize: 11, fill: "#64748b" }}
+                          interval={0}
+                          angle={-20}
+                          textAnchor="end"
+                          height={60}
+                        />
+                        <YAxis domain={[0, 100]} tick={{ fontSize: 12, fill: "#64748b" }} />
+                        <Tooltip formatter={(value) => [`${value}%`, "Avg score"]} />
+                        <Bar dataKey="percent" fill="#0ea5e9" radius={[8, 8, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-slate-500">
+                          <th className="pb-2 font-semibold">Section</th>
+                          <th className="pb-2 font-semibold">Sub-section</th>
+                          <th className="pb-2 text-center font-semibold">Score</th>
+                          <th className="pb-2 text-center font-semibold">Total</th>
+                          <th className="pb-2 font-semibold">Progress</th>
+                          <th className="pb-2 text-right font-semibold">Avg %</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {subSectionAnalytics.map((s) => (
+                          <tr key={s.key} className="border-t border-slate-100">
+                            <td className="py-3 font-medium text-slate-900">{s.section}</td>
+                            <td className="py-3 text-slate-700">{s.subSection}</td>
+                            <td className="py-3 text-center text-slate-700">{Math.round(s.earned)}</td>
+                            <td className="py-3 text-center text-slate-700">{Math.round(s.max)}</td>
+                            <td className="py-3 min-w-[120px]">
+                              <ProgressBar value={s.percent} tone="bg-sky-500" />
+                            </td>
+                            <td className="py-3 text-right">
+                              <ScoreBadge value={s.percent} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              </Panel>
             )}
 
             {weakQuestions.length > 0 && (
-              <div className="bg-white rounded-2xl border border-slate-200 p-4 mb-6">
-                <h2 className="font-semibold text-slate-900 mb-1">Hardest MCQs</h2>
-                <p className="text-xs text-slate-500 mb-3">Lowest accuracy for the selected test.</p>
-                <ol className="space-y-2 text-sm">
-                  {weakQuestions.map((q) => (
-                    <li key={q.i} className="flex items-start justify-between gap-3">
-                      <span className="text-slate-700">
-                        Q{q.i + 1}. {q.text}
-                      </span>
-                      <span className={`shrink-0 ${q.pct < 40 ? "text-rose-600 font-semibold" : "text-slate-600"}`}>
-                        {q.pct}% ({q.correct}/{q.total})
+              <Panel className="mb-6">
+                <PanelHeader
+                  title="Hardest MCQs"
+                  subtitle="Lowest accuracy for the selected test"
+                />
+                <ol className="divide-y divide-slate-100 px-2 py-1">
+                  {weakQuestions.map((q, index) => (
+                    <li key={q.i} className="flex items-start justify-between gap-4 px-3 py-3 text-sm">
+                      <div className="min-w-0">
+                        <p className="font-medium text-slate-900">
+                          <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-lg bg-slate-100 text-xs font-semibold text-slate-600">
+                            {index + 1}
+                          </span>
+                          Q{q.i + 1}. {q.text}
+                        </p>
+                        <div className="mt-2 max-w-md">
+                          <ProgressBar
+                            value={q.pct}
+                            tone={q.pct < 40 ? "bg-rose-500" : "bg-amber-500"}
+                          />
+                        </div>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold ${
+                          q.pct < 40
+                            ? "bg-rose-50 text-rose-700"
+                            : "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {q.pct}% · {q.correct}/{q.total}
                       </span>
                     </li>
                   ))}
                 </ol>
-              </div>
+              </Panel>
             )}
 
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="px-5 py-4 border-b border-slate-200">
-                <h2 className="font-semibold text-slate-900">
-                  {rows.length} student{rows.length === 1 ? "" : "s"}
-                </h2>
-              </div>
+            <Panel className="overflow-hidden">
+              <PanelHeader
+                title="Student results"
+                subtitle={`${rows.length} attempt${rows.length === 1 ? "" : "s"} · click a row for full breakdown`}
+              />
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[880px] text-sm">
                   <thead>
-                    <tr className="bg-slate-50 text-left text-slate-600">
-                      <th className="px-4 py-3 font-semibold">Name</th>
-                      <th className="px-4 py-3 font-semibold">Email</th>
+                    <tr className="bg-slate-50/90 text-left text-slate-600">
+                      <th className="px-4 py-3 font-semibold">Student</th>
                       <th className="px-4 py-3 font-semibold">Test</th>
                       {scoreColumns.map((col) => (
                         <th key={col.key} className="px-4 py-3 font-semibold whitespace-nowrap">
@@ -1025,196 +1190,249 @@ function ResultsInner() {
                       const submissionId = row.id || row.userId;
                       const rowKey = `${row.testId}-${submissionId}`;
                       return (
-                      <tr
-                        key={rowKey}
-                        className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer"
-                        onClick={() => setDetail(row)}
-                      >
-                        <td className="px-4 py-3 font-medium text-slate-900">
-                          {row.name || "—"}
-                        </td>
-                        <td className="px-4 py-3 text-slate-600">{row.email || "—"}</td>
-                        <td className="px-4 py-3 text-slate-700">{row.testTitle || row.testId}</td>
-                        {scoreColumns.map((col) => {
-                          const cell =
-                            subSectionColumns.length > 0
-                              ? bySub[col.key]
-                              : bySection[col.key];
-                          return (
-                            <td key={col.key} className="px-4 py-3 whitespace-nowrap">
-                              {cell ? (
-                                <div className="flex items-center gap-2">
-                                  <span className="text-slate-700">
-                                    {Math.round(cell.earned)}/{cell.max}
-                                  </span>
-                                  <ScoreBadge value={cell.percent} />
-                                </div>
-                              ) : (
-                                <span className="text-slate-400">—</span>
-                              )}
-                            </td>
-                          );
-                        })}
-                        <td className="px-4 py-3">
-                          <ScoreBadge value={row.percent} />
-                        </td>
-                        <td className="px-4 py-3 text-slate-600">{formatSubmittedAt(row.submittedAt)}</td>
-                        <td className="px-4 py-3 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            title="Send WhatsApp result"
-                            disabled={waSending || !!waSendingRowKey || !!deletingKey}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              sendWhatsAppResults([row], { single: true });
-                            }}
-                            className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 mr-1"
-                          >
-                            <MessageCircle className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            title="Delete this result"
-                            disabled={!!deletingKey}
-                            onClick={(e) => handleDeleteAttempt(row, e)}
-                            className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </td>
-                      </tr>
+                        <tr
+                          key={rowKey}
+                          className="border-t border-slate-100 transition-colors hover:bg-[#00448a]/[0.03] cursor-pointer"
+                          onClick={() => setDetail(row)}
+                        >
+                          <td className="px-4 py-3">
+                            <p className="font-semibold text-slate-900">{row.name || "—"}</p>
+                            <p className="mt-0.5 text-xs text-slate-500">
+                              {row.email ||
+                                [row.college, row.branch, row.phone].filter(Boolean).join(" · ") ||
+                                "—"}
+                            </p>
+                            {row.source === "public_link" ? (
+                              <span className="mt-1 inline-flex rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-800">
+                                Public link
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="px-4 py-3 text-slate-700">{row.testTitle || row.testId}</td>
+                          {scoreColumns.map((col) => {
+                            const cell =
+                              subSectionColumns.length > 0
+                                ? bySub[col.key]
+                                : bySection[col.key];
+                            return (
+                              <td key={col.key} className="px-4 py-3 whitespace-nowrap">
+                                {cell ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-slate-700">
+                                      {Math.round(cell.earned)}/{cell.max}
+                                    </span>
+                                    <ScoreBadge value={cell.percent} />
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td className="px-4 py-3">
+                            <ScoreBadge value={row.percent} />
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {formatSubmittedAt(row.submittedAt)}
+                          </td>
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              title="Send WhatsApp result"
+                              disabled={waSending || !!waSendingRowKey || !!deletingKey}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                sendWhatsAppResults([row], { single: true });
+                              }}
+                              className="mr-1 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                            >
+                              <MessageCircle className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              title="Delete this result"
+                              disabled={!!deletingKey}
+                              onClick={(e) => handleDeleteAttempt(row, e)}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </td>
+                        </tr>
                       );
                     })}
                   </tbody>
                 </table>
               </div>
-              <p className="px-5 py-3 text-xs text-slate-500">
-              Click a row for section and sub-section scores. Use the trash icon to delete that candidate’s result.
-              </p>
-            </div>
+            </Panel>
           </>
         )}
       </div>
 
       {detail && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[85vh] overflow-auto">
-            <div className="flex items-start justify-between p-4 border-b">
-              <div>
-                <h3 className="font-semibold text-slate-900">{detail.name || "Student"}</h3>
-                <p className="text-sm text-slate-500">{detail.email}</p>
-                <p className="text-sm text-slate-600 mt-1">{detail.testTitle}</p>
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/45 p-4 backdrop-blur-[2px] sm:items-center">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-auto rounded-3xl border border-slate-200 bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-semibold text-slate-900">
+                    {detail.name || "Student"}
+                  </h3>
+                  <p className="text-sm text-slate-500">{detail.email || "—"}</p>
+                  <p className="mt-1 text-sm font-medium text-slate-700">{detail.testTitle}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDetail(null)}
+                  className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                >
+                  <X className="h-5 w-5" />
+                </button>
               </div>
-              <button type="button" onClick={() => setDetail(null)} className="p-1 rounded hover:bg-slate-100">
-                <X className="h-5 w-5" />
-              </button>
             </div>
-            <div className="p-4 space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <ScoreBadge value={detail.percent} />
-                <span className="text-sm text-slate-600">
-                  MCQ {detail.mcqCorrect ?? 0}/{detail.mcqTotal ?? 0}
-                </span>
-                {detail.codingMax ? (
-                  <span className="text-sm text-slate-600">
-                    Coding {Math.round(detail.codingScore || 0)}/{detail.codingMax}
-                  </span>
-                ) : null}
+
+            <div className="space-y-5 p-5">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">Total</p>
+                  <div className="mt-1">
+                    <ScoreBadge value={detail.percent} />
+                  </div>
+                </div>
+                <div className="rounded-2xl bg-sky-50 p-3">
+                  <p className="text-xs text-sky-700">MCQ</p>
+                  <p className="mt-1 text-sm font-bold text-sky-900">
+                    {detail.mcqCorrect ?? 0}/{detail.mcqTotal ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">Coding</p>
+                  <p className="mt-1 text-sm font-bold text-slate-900">
+                    {detail.codingMax
+                      ? `${Math.round(detail.codingScore || 0)}/${detail.codingMax}`
+                      : "—"}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">Submitted</p>
+                  <p className="mt-1 text-xs font-semibold text-slate-800">
+                    {formatSubmittedAt(detail.submittedAt)}
+                  </p>
+                </div>
               </div>
-              <p className="text-xs text-slate-500">Submitted {formatSubmittedAt(detail.submittedAt)}</p>
+
               {Object.keys(sectionScoresForRow(detail)).length > 0 && (
                 <div>
-                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Section-wise scores</h4>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-slate-500">
-                        <th className="py-2">Section</th>
-                        <th className="py-2 text-center">Score</th>
-                        <th className="py-2 text-center">Total</th>
-                        <th className="py-2 text-right">%</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.values(sectionScoresForRow(detail)).map((s) => (
-                        <tr key={s.section} className="border-t border-slate-100">
-                          <td className="py-2 font-medium text-slate-800">{s.section}</td>
-                          <td className="py-2 text-center text-[#00448a] font-semibold">
-                            {Math.round(s.earned)}
-                          </td>
-                          <td className="py-2 text-center text-slate-600">{Math.round(s.max)}</td>
-                          <td className="py-2 text-right">
-                            <ScoreBadge value={s.percent} />
-                          </td>
+                  <h4 className="mb-2 text-sm font-semibold text-slate-800">Section-wise scores</h4>
+                  <div className="overflow-hidden rounded-2xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 text-left text-slate-500">
+                          <th className="px-3 py-2 font-semibold">Section</th>
+                          <th className="px-3 py-2 text-center font-semibold">Score</th>
+                          <th className="px-3 py-2 text-center font-semibold">Total</th>
+                          <th className="px-3 py-2 text-right font-semibold">%</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {Object.keys(subSectionScoresForRow(detail)).length > 0 && (
-                <div>
-                  <h4 className="text-sm font-semibold text-slate-800 mb-2">Sub-section-wise scores</h4>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-slate-500">
-                        <th className="py-2">Section</th>
-                        <th className="py-2">Sub-section</th>
-                        <th className="py-2 text-center">Score</th>
-                        <th className="py-2 text-center">Total</th>
-                        <th className="py-2 text-right">%</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.values(subSectionScoresForRow(detail))
-                        .sort((a, b) => {
-                          const sec = String(a.section).localeCompare(String(b.section));
-                          if (sec !== 0) return sec;
-                          return String(a.subSection).localeCompare(String(b.subSection));
-                        })
-                        .map((s) => (
-                          <tr key={s.key || `${s.section}-${s.subSection}`} className="border-t border-slate-100">
-                            <td className="py-2 font-medium text-slate-800">{s.section}</td>
-                            <td className="py-2 text-slate-700">{s.subSection}</td>
-                            <td className="py-2 text-center text-[#00448a] font-semibold">
+                      </thead>
+                      <tbody>
+                        {Object.values(sectionScoresForRow(detail)).map((s) => (
+                          <tr key={s.section} className="border-t border-slate-100">
+                            <td className="px-3 py-2.5 font-medium text-slate-800">{s.section}</td>
+                            <td className="px-3 py-2.5 text-center font-semibold text-[#00448a]">
                               {Math.round(s.earned)}
                             </td>
-                            <td className="py-2 text-center text-slate-600">{Math.round(s.max)}</td>
-                            <td className="py-2 text-right">
+                            <td className="px-3 py-2.5 text-center text-slate-600">
+                              {Math.round(s.max)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
                               <ScoreBadge value={s.percent} />
                             </td>
                           </tr>
                         ))}
-                    </tbody>
-                  </table>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
+
+              {Object.keys(subSectionScoresForRow(detail)).length > 0 && (
+                <div>
+                  <h4 className="mb-2 text-sm font-semibold text-slate-800">
+                    Sub-section-wise scores
+                  </h4>
+                  <div className="overflow-hidden rounded-2xl border border-slate-200">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 text-left text-slate-500">
+                          <th className="px-3 py-2 font-semibold">Section</th>
+                          <th className="px-3 py-2 font-semibold">Sub-section</th>
+                          <th className="px-3 py-2 text-center font-semibold">Score</th>
+                          <th className="px-3 py-2 text-center font-semibold">Total</th>
+                          <th className="px-3 py-2 text-right font-semibold">%</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.values(subSectionScoresForRow(detail))
+                          .sort((a, b) => {
+                            const sec = String(a.section).localeCompare(String(b.section));
+                            if (sec !== 0) return sec;
+                            return String(a.subSection).localeCompare(String(b.subSection));
+                          })
+                          .map((s) => (
+                            <tr
+                              key={s.key || `${s.section}-${s.subSection}`}
+                              className="border-t border-slate-100"
+                            >
+                              <td className="px-3 py-2.5 font-medium text-slate-800">{s.section}</td>
+                              <td className="px-3 py-2.5 text-slate-700">{s.subSection}</td>
+                              <td className="px-3 py-2.5 text-center font-semibold text-[#00448a]">
+                                {Math.round(s.earned)}
+                              </td>
+                              <td className="px-3 py-2.5 text-center text-slate-600">
+                                {Math.round(s.max)}
+                              </td>
+                              <td className="px-3 py-2.5 text-right">
+                                <ScoreBadge value={s.percent} />
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {Array.isArray(detail.questionBreakdown) && detail.questionBreakdown.length > 0 ? (
-                <ul className="space-y-1.5 text-sm">
-                  {detail.questionBreakdown.map((q) => (
-                    <li
-                      key={`${q.type}-${q.i}`}
-                      className={`rounded-lg px-3 py-2 ${
-                        q.type === "mcq"
-                          ? q.correct
-                            ? "bg-emerald-50 text-emerald-800"
-                            : q.unanswered
-                              ? "bg-slate-100 text-slate-600"
-                              : "bg-rose-50 text-rose-800"
-                          : "bg-violet-50 text-violet-800"
-                      }`}
-                    >
-                      {q.type === "mcq"
-                        ? `Q${q.i + 1} MCQ · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""}${q.unanswered ? " · skipped" : q.correct ? " · correct" : " · wrong"}`
-                        : `Q${q.i + 1} Coding · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""} · ${q.passed || 0}/${q.totalCases || 0} cases`}
-                    </li>
-                  ))}
-                </ul>
+                <div>
+                  <h4 className="mb-2 text-sm font-semibold text-slate-800">Question breakdown</h4>
+                  <ul className="max-h-56 space-y-1.5 overflow-auto text-sm">
+                    {detail.questionBreakdown.map((q) => (
+                      <li
+                        key={`${q.type}-${q.i}`}
+                        className={`rounded-xl px-3 py-2 ${
+                          q.type === "mcq"
+                            ? q.correct
+                              ? "bg-emerald-50 text-emerald-800"
+                              : q.unanswered
+                                ? "bg-slate-100 text-slate-600"
+                                : "bg-rose-50 text-rose-800"
+                            : "bg-sky-50 text-sky-900"
+                        }`}
+                      >
+                        {q.type === "mcq"
+                          ? `Q${q.i + 1} MCQ · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""}${q.unanswered ? " · skipped" : q.correct ? " · correct" : " · wrong"}`
+                          : `Q${q.i + 1} Coding · ${q.section}${q.subSection ? ` › ${q.subSection}` : ""} · ${q.passed || 0}/${q.totalCases || 0} cases`}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ) : (
                 <p className="text-sm text-slate-500">
                   Question-level detail is available for attempts submitted after this analytics update.
                 </p>
               )}
-              <div className="pt-2 flex flex-wrap gap-2 border-t">
+
+              <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
                 <button
                   type="button"
                   disabled={waSending || !!waSendingRowKey || !!deletingKey}
@@ -1222,7 +1440,7 @@ function ResultsInner() {
                     e.stopPropagation();
                     sendWhatsAppResults([detail], { single: true });
                   }}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-200 text-emerald-700 text-sm hover:bg-emerald-50 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
                 >
                   <MessageCircle className="h-4 w-4" />
                   {waSendingRowKey ? "Sending…" : "Send WhatsApp"}
@@ -1231,7 +1449,7 @@ function ResultsInner() {
                   type="button"
                   disabled={!!deletingKey}
                   onClick={(e) => handleDeleteAttempt(detail, e)}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-200 text-red-600 text-sm hover:bg-red-50 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
                 >
                   <Trash2 className="h-4 w-4" />
                   Delete this result
@@ -1240,7 +1458,7 @@ function ResultsInner() {
                   type="button"
                   disabled={!!deletingKey}
                   onClick={(e) => handleDeleteCandidate(detail, e)}
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-red-200 text-red-700 text-sm hover:bg-red-50 disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-xl border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                 >
                   <Trash2 className="h-4 w-4" />
                   Delete all for this candidate

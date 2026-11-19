@@ -120,6 +120,20 @@ export default function Navbar({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [openNavDropdown]);
 
+  // At laptop width (1024px+), close the phone/tablet drawer
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => {
+      if (mq.matches) {
+        setMobileMenuOpen(false);
+        setMobileExpandedDropdown(null);
+      }
+    };
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
   const loadMockTestCompanies = useCallback(async () => {
     setMockTestsLoading(true);
     try {
@@ -376,16 +390,16 @@ export default function Navbar({
 
   return (
     <>
-      <nav className={`fixed top-0 left-0 right-0 bg-[#00448a] text-white shadow-lg px-4 sm:px-6 py-3 flex justify-between items-center z-50 transition-transform duration-300 ease-in-out ${
+      <nav className={`fixed top-0 left-0 right-0 bg-[#00448a] text-white shadow-lg px-3 sm:px-4 lg:px-4 xl:px-6 py-2.5 sm:py-3 flex justify-between items-center gap-2 lg:gap-3 z-50 transition-transform duration-300 ease-in-out ${
         isVisible ? 'translate-y-0' : '-translate-y-full'
       }`}>
-        {/* Left Section: Mobile Menu + Logo */}
-        <div className="flex items-center space-x-2 sm:space-x-4">
-          {/* Mobile Menu Toggle */}
+        {/* Left: drawer below laptop, profile menu from 1024px */}
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          {/* Drawer toggle: phone & tablet only (< 1024px) */}
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="p-2 rounded-full hover:bg-white/10 md:hidden"
-            aria-label="Toggle mobile menu"
+            className="shrink-0 p-2 rounded-full hover:bg-white/10 lg:hidden"
+            aria-label="Toggle menu"
           >
             {mobileMenuOpen ? (
               <XMarkIcon className="w-6 h-6 text-white" />
@@ -394,8 +408,8 @@ export default function Navbar({
             )}
           </button>
 
-          {/* Desktop Profile Menu Toggle */}
-          <div className="relative hidden md:block">
+          {/* Profile menu from small laptop (1024px) up */}
+          <div className="relative hidden lg:block shrink-0">
             <button
               ref={desktopMenuButtonRef}
               onClick={() => setMenuOpen(!menuOpen)}
@@ -403,9 +417,9 @@ export default function Navbar({
               aria-label="Toggle profile menu"
             >
               {menuOpen ? (
-                <XMarkIcon className="w-7 h-7 text-white" />
+                <XMarkIcon className="w-6 h-6 text-white xl:w-7 xl:h-7" />
               ) : (
-                <Bars3Icon className="w-7 h-7 text-white" />
+                <Bars3Icon className="w-6 h-6 text-white xl:w-7 xl:h-7" />
               )}
             </button>
 
@@ -473,24 +487,29 @@ export default function Navbar({
             )}
           </div>
 
-          {/* Logo + Title */}
-          <div className="flex items-center space-x-2">
-            <Image 
-              src="/vawe-emblem.png" 
-              alt="VAWE LMS Logo" 
-              width={723} 
-              height={684} 
+          {/* Logo + Title — full emblem, sharp, no crop */}
+          <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
+            <Image
+              src="/vawe-emblem-nav.png"
+              alt="VAWE LMS Logo"
+              width={743}
+              height={768}
               priority
-              className="h-9 w-auto sm:h-11 object-contain" 
+              unoptimized
+              sizes="(max-width: 640px) 44px, (max-width: 1280px) 52px, 56px"
+              className="h-11 w-auto shrink-0 object-contain drop-shadow-sm sm:h-12 xl:h-14"
             />
-           <h1 className="text-lg sm:text-xl font-bold tracking-wide " style={{ fontFamily: '"Times New Roman", Times, serif' }}>
+            <h1
+              className="truncate text-base font-bold tracking-wide sm:text-lg lg:text-base xl:text-xl"
+              style={{ fontFamily: '"Times New Roman", Times, serif' }}
+            >
               VAWE INSTITUTES
             </h1>
           </div>
         </div>
 
-        {/* Right Section: Desktop/Tablet Navigation Links (md = tablet, lg = laptop) */}
-        <ul className="hidden md:flex md:space-x-3 lg:space-x-6 font-medium items-center">
+        {/* Horizontal nav from 1024px — readable sizes, no wrap */}
+        <ul className="hidden lg:flex lg:min-w-0 lg:flex-1 lg:items-center lg:justify-end lg:gap-1 xl:gap-1.5 2xl:gap-3 font-medium">
           {navigationLinks.map((link) =>
             link.children ? (
               <li
@@ -515,16 +534,16 @@ export default function Navbar({
                   onClick={() =>
                     setOpenNavDropdown((prev) => (prev === link.label ? null : link.label))
                   }
-                  className="flex items-center space-x-1 text-white hover:text-[#26ebe5] transition"
+                  className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs leading-snug text-white hover:bg-white/10 hover:text-[#26ebe5] transition xl:px-2.5 xl:text-sm 2xl:gap-1.5 2xl:px-3 2xl:text-[15px]"
                 >
-                  <link.icon className="w-5 h-5" />
+                  <link.icon className="h-3.5 w-3.5 shrink-0 xl:h-4 xl:w-4 2xl:h-5 2xl:w-5" />
                   <span>{link.label}</span>
                   <ChevronDownIcon
-                    className={`w-4 h-4 transition-transform ${openNavDropdown === link.label ? "rotate-180" : ""}`}
+                    className={`h-3.5 w-3.5 shrink-0 transition-transform ${openNavDropdown === link.label ? "rotate-180" : ""}`}
                   />
                 </button>
                 {openNavDropdown === link.label && (
-                  <div className="absolute left-0 top-full mt-2 pt-1.5">
+                  <div className="absolute left-0 top-full mt-2 pt-1.5 z-50">
                     <div className="bg-white text-gray-800 shadow-[0_10px_40px_-12px_rgba(0,0,0,0.2)] rounded-xl py-1.5 min-w-[220px] border border-gray-100 animate-fade-in">
                       {link.label === "Mock Test" && mockTestsLoading && mockTestCompanies.length <= 1 ? (
                         <p className="px-4 py-2 text-xs text-gray-500">Loading companies…</p>
@@ -551,9 +570,9 @@ export default function Navbar({
               <li key={link.href}>
                 <Link
                   href={link.href}
-                  className="flex items-center space-x-1 text-white hover:text-[#26ebe5] transition"
+                  className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-xs leading-snug text-white hover:bg-white/10 hover:text-[#26ebe5] transition xl:px-2.5 xl:text-sm 2xl:gap-1.5 2xl:px-3 2xl:text-[15px]"
                 >
-                  <link.icon className="w-5 h-5" />
+                  <link.icon className="h-3.5 w-3.5 shrink-0 xl:h-4 xl:w-4 2xl:h-5 2xl:w-5" />
                   <span>{link.label}</span>
                 </Link>
               </li>
@@ -562,33 +581,36 @@ export default function Navbar({
         </ul>
       </nav>
 
-      {/* Mobile Menu Overlay (hidden on tablet md and up) */}
+      {/* Drawer for phone & tablet only (< 1024px) */}
       {mobileMenuOpen && (
-        <div className="fixed inset-0 z-40 md:hidden">
-          {/* Backdrop */}
-          <div 
-            className="fixed inset-0 bg-black/50" 
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div
+            className="fixed inset-0 bg-black/50"
             onClick={() => setMobileMenuOpen(false)}
           />
-          
-          {/* Mobile Menu */}
-          <div className="fixed left-0 top-3 bottom-3 w-80 max-w-[85vw] max-h-[670px] bg-white shadow-2xl rounded-r-2xl overflow-hidden transform transition-transform duration-300 ease-in-out">
+
+          <div className="fixed left-0 top-0 bottom-0 flex w-[min(22rem,88vw)] flex-col overflow-hidden bg-white shadow-2xl sm:top-3 sm:bottom-3 sm:rounded-r-2xl">
             <div className="flex flex-col h-full">
-              {/* Mobile Menu Header */}
-              <div className="flex items-center justify-between p-4 border-b">
-                <div className="flex items-center space-x-2">
-                  <Image 
-                    src="/vawe-emblem.png" 
-                    alt="VAWE LMS Logo" 
-                    width={723} 
-                    height={684} 
-                    className="h-9 w-auto object-contain" 
+              <div className="flex items-center justify-between border-b p-4">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Image
+                    src="/vawe-emblem-nav.png"
+                    alt="VAWE LMS Logo"
+                    width={743}
+                    height={768}
+                    unoptimized
+                    sizes="48px"
+                    className="h-12 w-auto shrink-0 object-contain"
                   />
-                  <h2 className="text-lg font-bold text-gray-900">Menu</h2>
+                  <div className="min-w-0">
+                    <h2 className="truncate text-lg font-bold text-gray-900">VAWE INSTITUTES</h2>
+                    <p className="text-xs text-gray-500">Menu</p>
+                  </div>
                 </div>
                 <button
                   onClick={() => setMobileMenuOpen(false)}
-                  className="p-2 rounded-full hover:bg-white/10"
+                  className="shrink-0 rounded-full p-2 hover:bg-gray-100"
+                  aria-label="Close menu"
                 >
                   <XMarkIcon className="w-6 h-6 text-gray-600" />
                 </button>
@@ -627,7 +649,7 @@ export default function Navbar({
                               prev === link.label ? null : link.label
                             )
                           }
-                          className="flex items-center justify-between w-full space-x-3 px-4 py-3 text-gray-700 hover:bg-[#26ebe5]/10 hover:text-[#00448a] transition-colors"
+                          className="flex w-full items-center justify-between gap-3 px-4 py-3.5 text-gray-700 hover:bg-[#26ebe5]/10 hover:text-[#00448a] transition-colors"
                         >
                           <div className="flex items-center space-x-3">
                             <link.icon className="w-5 h-5" />
@@ -665,9 +687,9 @@ export default function Navbar({
                         <Link
                           href={link.href}
                           onClick={() => setMobileMenuOpen(false)}
-                          className="flex items-center space-x-3 px-4 py-3 text-gray-700 hover:bg-[#26ebe5]/10 hover:text-[#00448a] transition-colors"
+                          className="flex items-center gap-3 px-4 py-3.5 text-gray-700 hover:bg-[#26ebe5]/10 hover:text-[#00448a] transition-colors"
                         >
-                          <link.icon className="w-5 h-5" />
+                          <link.icon className="w-5 h-5 shrink-0" />
                           <span className="font-medium">{link.label}</span>
                         </Link>
                       </li>

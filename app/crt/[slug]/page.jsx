@@ -11,6 +11,7 @@ import { collection, getDocs, query, where, doc, getDoc } from "firebase/firesto
 import { tenantSegments } from "@/lib/tenantPath";
 import { computeCrtStudentAttendance } from "@/lib/crtAttendance";
 import MyCrtProgressCard, { CrtProgrammeStrip, useMyCrtEnrollments } from "@/components/crt/MyCrtProgress";
+import CrtFaceAttendance from "@/components/crt/CrtFaceAttendance";
 import { crtCourseUrlSegment, isCourseVisibleToAnyBatch } from "@/lib/crtCourseFork";
 import {
   ArrowLeftIcon,
@@ -466,7 +467,8 @@ export default function CRTProgramDetailPage() {
           </section>
 
           {myEnrollment && (
-            <div className="mb-10">
+            <div className="mb-10 space-y-6">
+              <CrtFaceAttendance user={user} crtId={myEnrollment.crtId} />
               <MyCrtProgressCard
                 user={user}
                 enrollment={{ ...myEnrollment, slug }}

@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import CheckAuth from "@/lib/CheckAuth";
 import { isAppleMobileDevice } from "@/lib/deviceDetect";
 import { auth, db } from "@/lib/firebase";
@@ -14,7 +14,9 @@ import {
   fetchMockTestAccountBlock,
   fetchMockTestGroup,
   getMockQuestionSubSection,
+  getMockScopeTiming,
   getMockSubSectionsForSection,
+  hasMockSectionBasedTiming,
   isMockAnswerCorrect,
   isMockTestAccountBlocked,
   isMockTestLocked,
@@ -33,8 +35,20 @@ import {
   buildMockResultWhatsAppParams,
   pickStudentPhone,
 } from "@/lib/mockTestResultWhatsApp";
-import { useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
+import {
+  MOCK_PUBLIC_MODE_SEQUENTIAL,
+  normalizeMockPublicPhone,
+  readMockPublicSession,
+  resolveMockPublicAssignment,
+  writeMockPublicSession,
+} from "@/lib/mockTestPublicLinks";
+import { formatExamTime, useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
+
+function AuthGate({ publicMode, children }) {
+  if (publicMode) return children;
+  return <CheckAuth>{children}</CheckAuth>;
+}
 
 function SecureExamOverlays({
   started,
@@ -70,10 +84,17 @@ function SecureExamOverlays({
       )}
 
       {showTabWarning && started && (
-        <div className="fixed inset-0 z-[101] flex items-center justify-center p-4 bg-black/60">
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70">
           <div
-            className={`bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 text-center border-4 ${
-              tabSwitchCount >= 2 ? "border-red-600" : "border-orange-500"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tab-warning-title"
+            className={`bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 sm:p-8 text-center border-4 ${
+              tabSwitchCount >= 3
+                ? "border-red-600"
+                : tabSwitchCount >= 2
+                  ? "border-red-500"
+                  : "border-orange-500"
             }`}
           >
             <p
@@ -81,25 +102,35 @@ function SecureExamOverlays({
                 tabSwitchCount >= 2 ? "text-red-700" : "text-orange-600"
               }`}
             >
-              Warning {Math.min(tabSwitchCount, 3)} of 3
+              Warning {Math.min(Math.max(tabSwitchCount, 1), 3)} of 3
             </p>
-            <h2 className="text-2xl font-bold text-gray-900 mb-4">
-              {tabSwitchCount <= 1 ? "Do not leave this tab" : "Final warning"}
+            <h2 id="tab-warning-title" className="text-xl sm:text-2xl font-bold text-gray-900 mb-2">
+              Don&apos;t exit the page
             </h2>
-            <p className="text-sm text-gray-600 mb-4">
-              Tab switching is not allowed. This counts as 1 warning.
-              The test is blocked after 3 switches.
+            <p className="text-sm text-gray-600 mb-2">
+              {tabSwitchCount >= 3
+                ? "You left the tab 3 times. The test will be locked when you continue."
+                : tabSwitchCount >= 2
+                  ? "Final warning — one more leave will lock the test."
+                  : "Tab switching is not allowed during the test."}
+            </p>
+            <p className="text-xs text-gray-500 mb-5">
+              {tabSwitchCount >= 3
+                ? "Click below to acknowledge. Your attempt will be blocked."
+                : `You have ${3 - Math.min(Math.max(tabSwitchCount, 1), 3)} warning(s) left.`}
             </p>
             <button
               type="button"
               onClick={dismissTabWarning}
-              className={`px-6 py-2.5 text-white rounded-lg font-medium ${
-                tabSwitchCount >= 2
-                  ? "bg-red-600 hover:bg-red-700"
-                  : "bg-orange-500 hover:bg-orange-600"
+              className={`px-6 py-2.5 text-white rounded-lg font-semibold ${
+                tabSwitchCount >= 3
+                  ? "bg-red-700 hover:bg-red-800"
+                  : tabSwitchCount >= 2
+                    ? "bg-red-600 hover:bg-red-700"
+                    : "bg-orange-500 hover:bg-orange-600"
               }`}
             >
-              Continue test
+              {tabSwitchCount >= 3 ? "OK — lock test" : "Continue test"}
             </button>
           </div>
         </div>
@@ -194,9 +225,15 @@ function paletteButtonClass(status, isCurrent) {
   return "bg-white text-gray-700 border-gray-300 hover:bg-gray-50";
 }
 
-export default function TakeMockTestPage() {
+function TakeMockTestPage() {
   const { companySlug, testId } = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const publicLinkId = String(searchParams.get("link") || "").trim();
+  const publicMode = searchParams.get("public") === "1" && Boolean(publicLinkId);
+  const [publicSession, setPublicSession] = useState(null);
+  const [publicGateError, setPublicGateError] = useState("");
+  const [nextSequentialBusy, setNextSequentialBusy] = useState(false);
   const [test, setTest] = useState(null);
   const [group, setGroup] = useState(null);
   const [groupLabel, setGroupLabel] = useState("");
@@ -214,10 +251,40 @@ export default function TakeMockTestPage() {
   const [runLoading, setRunLoading] = useState({});
   const [scoreDetail, setScoreDetail] = useState(null);
   const [lockedAccount, setLockedAccount] = useState(null);
+  const [scopeTimeLeftMs, setScopeTimeLeftMs] = useState(null);
+  const [stayOnPageNotice, setStayOnPageNotice] = useState("");
+  const [startCountdown, setStartCountdown] = useState(null);
+  const [examEnterVisible, setExamEnterVisible] = useState(false);
+  const [startingExam, setStartingExam] = useState(false);
   const didInitPart = useRef(false);
+  const onScopeTimeUpRef = useRef(null);
+  const advancingScopeRef = useRef(false);
+  const countdownTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (!publicMode) {
+      setPublicSession(null);
+      setPublicGateError("");
+      return;
+    }
+    const session = readMockPublicSession(publicLinkId);
+    if (!session?.phoneVerified || !session?.phone || !session?.name) {
+      setPublicGateError("Please complete registration and WhatsApp verification first.");
+      setPublicSession(null);
+      return;
+    }
+    if (String(session.testId) !== String(testId)) {
+      setPublicGateError("This test does not match your assigned public link paper.");
+      setPublicSession(session);
+      return;
+    }
+    setPublicSession(session);
+    setPublicGateError("");
+  }, [publicMode, publicLinkId, testId]);
 
   const companyLabel = groupLabel || String(companySlug || "").replace(/_/g, " ");
-  const durationMinutes = Number(test?.durationMinutes) || 0;
+  const timingEnabled = useMemo(() => hasMockSectionBasedTiming(test), [test]);
+  const durationMinutes = timingEnabled ? 0 : Number(test?.durationMinutes) || 0;
 
   const loadStudentProfile = useCallback(async (user) => {
     let name = user?.displayName || "";
@@ -245,9 +312,29 @@ export default function TakeMockTestPage() {
 
   const persistAccountLock = useCallback(
     async ({ reason, count }) => {
-      const user = auth?.currentUser;
-      if (!user?.uid || !companySlug || !testId) return;
+      if (!companySlug || !testId) return;
       try {
+        if (publicMode && publicSession?.phone) {
+          const userId = normalizeMockPublicPhone(publicSession.phone);
+          await blockMockTestAccount(companySlug, testId, {
+            userId,
+            name: publicSession.name || "",
+            email: "",
+            reason,
+            tabSwitchCount: count,
+          });
+          setLockedAccount({
+            userId,
+            name: publicSession.name || "",
+            email: "",
+            blocked: true,
+            reason,
+            tabSwitchCount: count,
+          });
+          return;
+        }
+        const user = auth?.currentUser;
+        if (!user?.uid) return;
         const { name, email } = await loadStudentProfile(user);
         await blockMockTestAccount(companySlug, testId, {
           userId: user.uid,
@@ -268,7 +355,7 @@ export default function TakeMockTestPage() {
         console.error("Failed to lock mock test account:", e);
       }
     },
-    [companySlug, testId, loadStudentProfile]
+    [companySlug, testId, loadStudentProfile, publicMode, publicSession]
   );
 
   const secure = useSecureExamSession({
@@ -278,7 +365,107 @@ export default function TakeMockTestPage() {
     },
   });
   useNoCopy({ enabled: secure.started && !submitted, allowEditable: true });
-  const { markSubmitted, setOnTimeUp } = secure;
+  const { markSubmitted, setOnTimeUp, suppressViolations } = secure;
+
+  const showStayOnPageNotice = useCallback(
+    (detail = "") => {
+      suppressViolations(8000);
+      setStayOnPageNotice(
+        detail
+          ? `Don't exit the page. ${detail}`
+          : "Don't exit the page. Stay on this screen until the timer ends."
+      );
+    },
+    [suppressViolations]
+  );
+
+  useEffect(() => {
+    if (!stayOnPageNotice) return undefined;
+    suppressViolations(8000);
+    const id = setInterval(() => suppressViolations(8000), 3000);
+    return () => clearInterval(id);
+  }, [stayOnPageNotice, suppressViolations]);
+
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) {
+        clearTimeout(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!secure.started) {
+      setExamEnterVisible(false);
+      return undefined;
+    }
+    const id = requestAnimationFrame(() => setExamEnterVisible(true));
+    return () => cancelAnimationFrame(id);
+  }, [secure.started]);
+
+  async function beginStartCountdown() {
+    if (startingExam || startCountdown != null) return;
+    setStartingExam(true);
+    try {
+      const lockId = publicMode
+        ? normalizeMockPublicPhone(publicSession?.phone)
+        : auth?.currentUser?.uid;
+      if (lockId) {
+        const block = await fetchMockTestAccountBlock(companySlug, testId, lockId);
+        if (isMockTestAccountBlocked(block)) {
+          setLockedAccount(block);
+          setStartingExam(false);
+          return;
+        }
+      }
+    } catch (e) {
+      console.error("Failed to check mock test account lock:", e);
+    }
+
+    const clearCountdownTimer = () => {
+      if (countdownTimerRef.current) {
+        clearTimeout(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+    };
+
+    const wait = (ms) =>
+      new Promise((resolve) => {
+        clearCountdownTimer();
+        countdownTimerRef.current = setTimeout(resolve, ms);
+      });
+
+    try {
+      suppressViolations(20000);
+      setStartCountdown(3);
+      await wait(900);
+      suppressViolations(4000);
+      setStartCountdown(2);
+      await wait(900);
+      suppressViolations(4000);
+      setStartCountdown(1);
+      await wait(900);
+      suppressViolations(5000);
+      setStartCountdown("Go");
+      await wait(700);
+
+      const ok = await secure.startExam();
+      if (!ok) {
+        setStartCountdown(null);
+        setStartingExam(false);
+        return;
+      }
+
+      await wait(350);
+      setStartCountdown(null);
+      setStartingExam(false);
+    } catch (e) {
+      console.error("Failed to start exam countdown:", e);
+      setStartCountdown(null);
+      setStartingExam(false);
+    }
+  }
 
   const questions = useMemo(
     () => (Array.isArray(test?.questions) ? test.questions : []),
@@ -307,6 +494,24 @@ export default function TakeMockTestPage() {
     if (part === "coding") return [];
     return getMockSubSectionsForSection(questions, "mcq", activeSection);
   }, [questions, part, activeSection]);
+
+  const scopeTiming = useMemo(
+    () =>
+      getMockScopeTiming({
+        section: activeSection,
+        subSection: activeSubSection,
+        subSectionsInSection,
+        sectionTimings: test?.sectionTimings,
+        subSectionTimings: test?.subSectionTimings,
+      }),
+    [
+      activeSection,
+      activeSubSection,
+      subSectionsInSection,
+      test?.sectionTimings,
+      test?.subSectionTimings,
+    ]
+  );
 
   const sectionQuestions = useMemo(() => {
     return partQuestions.filter(({ q }) => {
@@ -451,9 +656,30 @@ export default function TakeMockTestPage() {
     setSubmitted(true);
     markSubmitted();
 
-    const user = auth?.currentUser;
-    if (user?.uid && companySlug && testId) {
-      try {
+    try {
+      if (publicMode && publicSession?.phone && companySlug && testId) {
+        const phone = normalizeMockPublicPhone(publicSession.phone);
+        await saveMockTestSubmission(companySlug, testId, {
+          userId: phone,
+          name: publicSession.name || "",
+          email: "",
+          phone,
+          college: publicSession.college || "",
+          branch: publicSession.branch || "",
+          source: "public_link",
+          publicLinkId,
+          ...score,
+          mcqAnswered,
+          codingAttempted,
+          questionBreakdown,
+          sectionScores,
+          subSectionScores,
+        });
+        return;
+      }
+
+      const user = auth?.currentUser;
+      if (user?.uid && companySlug && testId) {
         let name = user.displayName || "";
         let email = user.email || "";
         let phone = "";
@@ -511,11 +737,22 @@ export default function TakeMockTestPage() {
             console.error("Failed to send mock test WhatsApp result:", waErr.error || waRes.status);
           }
         }
-      } catch (e) {
-        console.error("Failed to save mock test result:", e);
       }
+    } catch (e) {
+      console.error("Failed to save mock test result:", e);
     }
-  }, [questions, answers, codeLanguages, markSubmitted, companySlug, testId, test?.title]);
+  }, [
+    questions,
+    answers,
+    codeLanguages,
+    markSubmitted,
+    companySlug,
+    testId,
+    test?.title,
+    publicMode,
+    publicSession,
+    publicLinkId,
+  ]);
 
   useEffect(() => {
     setOnTimeUp(() => {
@@ -561,7 +798,31 @@ export default function TakeMockTestPage() {
   }, [companySlug, testId]);
 
   useEffect(() => {
-    if (!companySlug || !testId || !auth) return undefined;
+    if (!companySlug || !testId) return undefined;
+
+    if (publicMode) {
+      let cancelled = false;
+      (async () => {
+        const phone = normalizeMockPublicPhone(publicSession?.phone);
+        if (!phone) {
+          setLockedAccount(null);
+          return;
+        }
+        try {
+          const block = await fetchMockTestAccountBlock(companySlug, testId, phone);
+          if (!cancelled) {
+            setLockedAccount(isMockTestAccountBlocked(block) ? block : null);
+          }
+        } catch (e) {
+          console.error("Failed to load public mock test account lock:", e);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (!auth) return undefined;
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user?.uid) {
         setLockedAccount(null);
@@ -575,7 +836,7 @@ export default function TakeMockTestPage() {
       }
     });
     return () => unsub();
-  }, [companySlug, testId]);
+  }, [companySlug, testId, publicMode, publicSession?.phone]);
 
   function goToQuestion(globalIdx) {
     setActiveIndex(globalIdx);
@@ -623,7 +884,18 @@ export default function TakeMockTestPage() {
     setRunLoading((p) => ({ ...p, [currentIdx]: false }));
   }
 
-  function switchPart(nextPart) {
+  function switchPart(nextPart, { force = false } = {}) {
+    if (
+      !force &&
+      timingEnabled &&
+      scopeTiming.mode !== "none" &&
+      scopeTimeLeftMs != null &&
+      scopeTimeLeftMs > 0 &&
+      nextPart !== part
+    ) {
+      showStayOnPageNotice("Wait until the current section time ends before moving on.");
+      return false;
+    }
     setPart(nextPart);
     const nextQs = questions
       .map((q, index) => ({ q, index }))
@@ -639,23 +911,47 @@ export default function TakeMockTestPage() {
           : getMockSubSectionsForSection(questions, "mcq", sec);
       setActiveSubSection(subs[0] || "General");
     }
+    return true;
   }
 
-  function goToNextScope() {
-    const pos = sectionQuestions.findIndex(({ index }) => index === currentIdx);
-    if (pos >= 0 && pos < sectionQuestions.length - 1) {
-      goToQuestion(sectionQuestions[pos + 1].index);
-      return true;
+  function goToNextScope({ force = false } = {}) {
+    // Normal "Save & Next": move within the current section/sub-section first.
+    if (!force) {
+      const pos = sectionQuestions.findIndex(({ index }) => index === currentIdx);
+      if (pos >= 0 && pos < sectionQuestions.length - 1) {
+        goToQuestion(sectionQuestions[pos + 1].index);
+        return true;
+      }
     }
-    if (subSectionsInSection.length) {
+
+    const timedLock =
+      timingEnabled &&
+      scopeTiming.mode !== "none" &&
+      scopeTimeLeftMs != null &&
+      scopeTimeLeftMs > 0 &&
+      !force;
+
+    // Section timer expiry jumps to the next section (skip leftover sub-sections).
+    const skipRemainingSubs = force && scopeTiming.mode === "section";
+
+    if (!skipRemainingSubs && subSectionsInSection.length) {
       const subIdx = subSectionsInSection.indexOf(activeSubSection);
       if (subIdx >= 0 && subIdx < subSectionsInSection.length - 1) {
+        if (timedLock && scopeTiming.mode === "subsection") {
+          showStayOnPageNotice("Wait until this sub-section time ends before moving to the next one.");
+          return false;
+        }
         setActiveSubSection(subSectionsInSection[subIdx + 1]);
         return true;
       }
     }
+
     const secIdx = sectionsInPart.indexOf(activeSection);
     if (secIdx >= 0 && secIdx < sectionsInPart.length - 1) {
+      if (timedLock) {
+        showStayOnPageNotice("Wait until this section time ends before moving to the next section.");
+        return false;
+      }
       const nextSec = sectionsInPart[secIdx + 1];
       setActiveSection(nextSec);
       const subs =
@@ -665,12 +961,62 @@ export default function TakeMockTestPage() {
       setActiveSubSection(subs[0] || "General");
       return true;
     }
+
     if (part === "mcq" && summary.coding > 0) {
-      switchPart("coding");
-      return true;
+      return switchPart("coding", { force });
     }
     return false;
   }
+
+  function forceAdvanceTimedScope() {
+    if (advancingScopeRef.current) return;
+    advancingScopeRef.current = true;
+    try {
+      const moved = goToNextScope({ force: true });
+      if (!moved && !submitted) {
+        finalizeSubmit();
+        alert("Section time is up. Your test has been submitted.");
+      }
+    } finally {
+      setTimeout(() => {
+        advancingScopeRef.current = false;
+      }, 400);
+    }
+  }
+
+  onScopeTimeUpRef.current = forceAdvanceTimedScope;
+
+  useEffect(() => {
+    if (!secure.started || !timingEnabled) {
+      setScopeTimeLeftMs(null);
+      return undefined;
+    }
+    const minutes = Number(scopeTiming.minutes) || 0;
+    if (minutes <= 0 || scopeTiming.mode === "none") {
+      setScopeTimeLeftMs(null);
+      return undefined;
+    }
+
+    let left = minutes * 60 * 1000;
+    setScopeTimeLeftMs(left);
+    const timerId = setInterval(() => {
+      left = Math.max(0, left - 1000);
+      setScopeTimeLeftMs(left);
+      if (left <= 0) {
+        clearInterval(timerId);
+        onScopeTimeUpRef.current?.();
+      }
+    }, 1000);
+
+    return () => clearInterval(timerId);
+  }, [
+    secure.started,
+    timingEnabled,
+    part,
+    scopeTiming.key,
+    scopeTiming.minutes,
+    scopeTiming.mode,
+  ]);
 
   const canContinueToCoding = part === "mcq" && summary.coding > 0;
   const canGoNext =
@@ -690,30 +1036,83 @@ export default function TakeMockTestPage() {
     finalizeSubmit();
   }
 
+  async function continueSequentialPublic() {
+    if (!publicMode || !publicSession?.phone || !publicLinkId) return;
+    setNextSequentialBusy(true);
+    try {
+      const assignment = await resolveMockPublicAssignment({
+        linkId: publicLinkId,
+        phone: publicSession.phone,
+      });
+      if (!assignment || assignment.allDone) {
+        alert("You have completed all tests in this link. Thank you!");
+        router.push(`/mock-test/public/${encodeURIComponent(publicLinkId)}`);
+        return;
+      }
+      writeMockPublicSession(publicLinkId, {
+        ...publicSession,
+        testId: assignment.testId,
+        testTitle: assignment.testTitle,
+        mode: assignment.mode,
+        step: assignment.step,
+        totalSteps: assignment.totalSteps,
+        linkLabel: assignment.linkLabel,
+      });
+      router.push(
+        `/mock-test/${encodeURIComponent(assignment.companySlug)}/${encodeURIComponent(assignment.testId)}?public=1&link=${encodeURIComponent(publicLinkId)}`
+      );
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Could not open the next test.");
+    } finally {
+      setNextSequentialBusy(false);
+    }
+  }
+
   if (loading) {
     return (
-      <CheckAuth>
+      <AuthGate publicMode={publicMode}>
         <ExamPageSkeleton />
-      </CheckAuth>
+      </AuthGate>
+    );
+  }
+
+  if (publicMode && publicGateError) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center bg-slate-50 px-4">
+        <div className="max-w-md w-full bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          <h1 className="text-xl font-bold text-slate-900 mb-2">Registration required</h1>
+          <p className="text-sm text-slate-600 mb-6">{publicGateError}</p>
+          <Link
+            href={`/mock-test/public/${encodeURIComponent(publicLinkId)}`}
+            className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
+          >
+            Go to registration
+          </Link>
+        </div>
+      </div>
     );
   }
 
   if (!test) {
     return (
-      <CheckAuth>
+      <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh pt-24 px-4 text-center">
           <p className="text-gray-700 mb-4">Mock test not found.</p>
-          <Link href={`/mock-test/${companySlug}`} className="text-[#00448a] hover:underline">
-            Back to {companyLabel}
+          <Link
+            href={publicMode ? `/mock-test/public/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
+            className="text-[#00448a] hover:underline"
+          >
+            Back
           </Link>
         </div>
-      </CheckAuth>
+      </AuthGate>
     );
   }
 
-  if (isMockTestLocked(test, group)) {
+  if (!publicMode && isMockTestLocked(test, group)) {
     return (
-      <CheckAuth>
+      <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh flex items-center justify-center bg-slate-50 px-4">
           <div className="max-w-md w-full bg-white rounded-2xl border border-slate-200 p-8 text-center">
             <h1 className="text-xl font-bold text-slate-900 mb-2">Test locked</h1>
@@ -728,86 +1127,268 @@ export default function TakeMockTestPage() {
             </Link>
           </div>
         </div>
-      </CheckAuth>
+      </AuthGate>
     );
   }
 
   if (secure.isBlocked || lockedAccount) {
     return (
-      <CheckAuth>
+      <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh flex items-center justify-center bg-red-50 px-4">
           <div className="max-w-md w-full bg-white rounded-2xl border border-red-200 p-8 text-center">
             <h1 className="text-xl font-bold text-red-900 mb-2">Account locked for this test</h1>
             <p className="text-sm text-red-700 mb-6">
               {lockedAccount?.reason || secure.blockReason || "This test is locked for your account after 3 tab switches. Ask an admin to unlock it."}
             </p>
-            <Link href={`/mock-test/${companySlug}`} className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white">
-              Back to {companyLabel}
+            <Link
+              href={publicMode ? `/mock-test/public/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
+              className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
+            >
+              Back
             </Link>
           </div>
         </div>
-      </CheckAuth>
+      </AuthGate>
     );
   }
 
   if (!secure.started) {
+    const totalQuestions = summary.total || questions.length;
+    const timingLabel = timingEnabled
+      ? "section / sub-section timers"
+      : durationMinutes
+        ? `${durationMinutes} minutes`
+        : "the allotted time";
+
     return (
-      <CheckAuth>
-        <div className="min-h-dvh bg-gradient-to-b from-sky-50 to-cyan-50 pt-24 px-4 sm:px-6 pb-10">
-          <div className="max-w-2xl mx-auto">
-            <button type="button" onClick={() => router.push(`/mock-test/${companySlug}`)} className="text-sm text-[#00448a] hover:underline mb-4">
-              ← Back to {companyLabel}
-            </button>
-            <div className="bg-white rounded-2xl shadow border p-6 sm:p-8">
-              <p className="text-sm text-[#00448a] font-medium">{companyLabel}</p>
-              <h1 className="text-2xl font-bold text-gray-900 mt-1">{test.title || "Mock Test"}</h1>
-              <div className="flex flex-wrap gap-2 mt-3 text-sm">
-                <span className="px-2 py-1 rounded bg-blue-50 text-blue-800">{summary.mcq} MCQ</span>
-                <span className="px-2 py-1 rounded bg-violet-50 text-violet-800">{summary.coding} Coding</span>
-                {durationMinutes ? <span>{durationMinutes} min</span> : null}
-              </div>
-              <ul className="mt-6 list-disc pl-5 text-sm text-gray-700 space-y-1">
-                <li>One question at a time with side question palette.</li>
-                <li>Fullscreen is required in Chrome to restrict tab switching.</li>
-                <li>Stay on this tab — 3 tab switches block the test.</li>
-                <li>Copying question text is not allowed.</li>
-              </ul>
-              <label className="mt-4 flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={secure.acceptedRules} onChange={(e) => secure.setAcceptedRules(e.target.checked)} />
-                I agree to the rules.
-              </label>
+      <AuthGate publicMode={publicMode}>
+        <div className="min-h-dvh bg-white">
+          <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 sm:py-8 pb-10">
+            {!publicMode ? (
               <button
                 type="button"
-                onClick={async () => {
-                  const user = auth?.currentUser;
-                  if (user?.uid) {
-                    try {
-                      const block = await fetchMockTestAccountBlock(companySlug, testId, user.uid);
-                      if (isMockTestAccountBlocked(block)) {
-                        setLockedAccount(block);
-                        return;
-                      }
-                    } catch (e) {
-                      console.error("Failed to check mock test account lock:", e);
-                    }
-                  }
-                  secure.startExam();
-                }}
-                disabled={!secure.acceptedRules}
-                className="mt-5 px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium disabled:opacity-50"
+                onClick={() => router.push(`/mock-test/${companySlug}`)}
+                className="text-sm text-[#00448a] hover:underline mb-4"
               >
-                Start Test
+                ← Back to {companyLabel}
               </button>
+            ) : null}
+
+            <div className="mb-4">
+              <p className="text-sm text-[#00448a] font-medium">{companyLabel}</p>
+              <h1 className="text-2xl sm:text-3xl font-bold text-black mt-1">
+                Instruction for Online Test
+              </h1>
+              <p className="mt-2 text-sm sm:text-base font-medium text-red-600">
+                Please read the Instructions carefully before starting the test.
+              </p>
+              <p className="mt-2 text-sm text-gray-700">
+                <span className="font-semibold">{test.title || "Mock Test"}</span>
+                {" · "}
+                {summary.mcq} MCQ
+                {summary.coding ? ` · ${summary.coding} Coding` : ""}
+                {publicMode && publicSession?.name
+                  ? ` · Candidate: ${publicSession.name}`
+                  : ""}
+              </p>
+            </div>
+
+            <ol className="list-decimal pl-5 sm:pl-6 space-y-3 text-sm sm:text-[15px] text-black leading-relaxed">
+              <li>
+                Total number of questions : <strong>{totalQuestions || "—"}</strong>
+                {summary.mcq || summary.coding
+                  ? ` (MCQ: ${summary.mcq}, Coding: ${summary.coding})`
+                  : ""}
+                .
+              </li>
+              <li>
+                The total duration of the test is <strong>{timingLabel}</strong>. A countdown timer
+                at the top right of the screen shows the time left
+                {timingEnabled ? " for the current section / sub-section" : ""}.
+              </li>
+              <li>
+                The Question Palette on the right shows all question numbers for the current
+                section. Use it to jump between questions.
+              </li>
+              <li>
+                The status of each question is shown with colours as explained below:
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full max-w-xl border border-gray-400 text-sm border-collapse">
+                    <tbody>
+                      {[
+                        { color: "bg-red-500", label: "Not answered / Not Attempted Question." },
+                        { color: "bg-green-500", label: "Answered / Attempted Question." },
+                        {
+                          color: "bg-yellow-400",
+                          label: "Not Answered & Marked for review.",
+                        },
+                        {
+                          color: "bg-violet-500",
+                          label: "Answered & Marked for Review.",
+                        },
+                        { color: "bg-gray-400", label: "Dumped / Skipped." },
+                        {
+                          color: "bg-white border border-gray-400",
+                          label: "Not Visited.",
+                        },
+                        {
+                          color: "bg-orange-500",
+                          label: "Current Question.",
+                        },
+                      ].map((row) => (
+                        <tr key={row.label} className="border border-gray-400">
+                          <td className="w-28 sm:w-36 p-2 border border-gray-400 align-middle">
+                            <span
+                              className={`inline-block h-7 w-10 sm:w-12 rounded-sm ${row.color}`}
+                            />
+                          </td>
+                          <td className="p-2 sm:p-2.5 border border-gray-400 text-black">
+                            {row.label}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </li>
+              <li>
+                You can shuffle between questions within a section using the palette or{" "}
+                <strong>Save &amp; Next</strong>.
+              </li>
+              <li>
+                Fullscreen is required (Chrome / desktop). Do not leave this tab — leaving the page
+                shows a warning. After <strong>3 tab switches</strong> the test is blocked.
+              </li>
+              <li>Copying question text is not allowed.</li>
+              {timingEnabled ? (
+                <li>
+                  Section / sub-section timers are enabled. You cannot open the next section until
+                  the current time ends — then it moves automatically.
+                </li>
+              ) : (
+                <li>
+                  You may move between sections freely until the overall test time ends.
+                </li>
+              )}
+              <li>
+                The final <strong>Submit Test</strong> button is available from the question palette
+                area. Review answers before submitting.
+              </li>
+              <li>
+                After submission you cannot change answers. Make sure you have attempted all
+                required questions.
+              </li>
+              <li>
+                Do not refresh or close the browser during the test. Progress may be lost if you
+                leave without submitting.
+              </li>
+              <li>
+                For coding questions, select the language, write your solution, and use{" "}
+                <strong>Run Code</strong> to check sample cases before moving on.
+              </li>
+            </ol>
+
+            <div className="mt-8 pt-5 border-t border-gray-200 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                <label className="text-sm font-medium text-black shrink-0">
+                  Choose your default language
+                </label>
+                <select
+                  defaultValue="English"
+                  className="border border-gray-400 rounded px-3 py-2 text-sm bg-white max-w-xs"
+                >
+                  <option>English</option>
+                </select>
+              </div>
+
+              <label className="flex items-start gap-2.5 text-sm text-black cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={secure.acceptedRules}
+                  onChange={(e) => secure.setAcceptedRules(e.target.checked)}
+                  className="mt-1 h-4 w-4 accent-[#00448a]"
+                />
+                <span>
+                  The computer provided to me is in proper working condition. I have read and
+                  understood the instructions given above.
+                </span>
+              </label>
+
+              <div className="pt-2 flex justify-center sm:justify-start">
+                <button
+                  type="button"
+                  onClick={beginStartCountdown}
+                  disabled={
+                    !secure.acceptedRules ||
+                    startingExam ||
+                    startCountdown != null ||
+                    (publicMode && !publicSession?.phoneVerified)
+                  }
+                  className="min-w-[160px] px-8 py-3 rounded bg-[#003366] hover:bg-[#00264d] text-white text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+                >
+                  {startingExam || startCountdown != null ? "Starting…" : "Start Test"}
+                </button>
+              </div>
             </div>
           </div>
+
+          {startCountdown != null ? (
+            <div className="fixed inset-0 z-[130] flex items-center justify-center bg-white">
+              <div className="w-full max-w-md mx-4 rounded-xl border border-slate-200 bg-white shadow-lg px-8 py-10 text-center">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#00448a]">
+                  {companyLabel}
+                </p>
+                <h2 className="mt-2 text-lg font-semibold text-slate-900 truncate">
+                  {test?.title || "Mock Test"}
+                </h2>
+                <p className="mt-6 text-sm text-slate-600">
+                  {startCountdown === "Go"
+                    ? "Loading your question paper…"
+                    : "Your test will begin in"}
+                </p>
+                <p
+                  key={String(startCountdown)}
+                  className="mt-3 text-5xl font-semibold tabular-nums text-slate-900"
+                >
+                  {startCountdown === "Go" ? "Starting" : startCountdown}
+                </p>
+                <div className="mt-6 mx-auto h-1 w-40 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    key={`bar-${String(startCountdown)}`}
+                    className="h-full bg-[#00448a]"
+                    style={{
+                      width: "100%",
+                      animation:
+                        startCountdown === "Go"
+                          ? "mockStartBar 0.7s linear forwards"
+                          : "mockStartBar 0.9s linear forwards",
+                    }}
+                  />
+                </div>
+                <p className="mt-5 text-xs text-slate-500">
+                  Please stay on this page. Do not refresh or switch tabs.
+                </p>
+              </div>
+              <style>{`
+                @keyframes mockStartBar {
+                  from { transform: translateX(-100%); }
+                  to { transform: translateX(0%); }
+                }
+              `}</style>
+            </div>
+          ) : null}
         </div>
-      </CheckAuth>
+      </AuthGate>
     );
   }
 
   if (submitted && scoreDetail) {
+    const isSequentialPublic =
+      publicMode &&
+      (publicSession?.mode === MOCK_PUBLIC_MODE_SEQUENTIAL ||
+        Number(publicSession?.totalSteps || 0) > 1);
     return (
-      <CheckAuth>
+      <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh flex items-center justify-center bg-gray-100 px-4">
           <div className="max-w-md w-full bg-white rounded-2xl border shadow-lg p-8 text-center">
             <h1 className="text-2xl font-bold text-gray-900 mb-4">Test Submitted</h1>
@@ -820,12 +1401,31 @@ export default function TakeMockTestPage() {
                 </p>
               )}
             </div>
-            <Link href={`/mock-test/${companySlug}`} className="inline-block px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium">
-              Back to {companyLabel}
-            </Link>
+            <div className="flex flex-col gap-2">
+              {isSequentialPublic ? (
+                <button
+                  type="button"
+                  onClick={continueSequentialPublic}
+                  disabled={nextSequentialBusy}
+                  className="inline-block px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium disabled:opacity-60"
+                >
+                  {nextSequentialBusy ? "Loading next…" : "Continue to next test"}
+                </button>
+              ) : null}
+              <Link
+                href={
+                  publicMode
+                    ? `/mock-test/public/${encodeURIComponent(publicLinkId)}`
+                    : `/mock-test/${companySlug}`
+                }
+                className="inline-block px-6 py-3 rounded-lg border border-slate-200 text-slate-800 font-medium"
+              >
+                {publicMode ? "Done" : `Back to ${companyLabel}`}
+              </Link>
+            </div>
           </div>
         </div>
-      </CheckAuth>
+      </AuthGate>
     );
   }
 
@@ -834,7 +1434,7 @@ export default function TakeMockTestPage() {
   const codingResults = runResults[currentIdx] || [];
 
   return (
-    <CheckAuth>
+    <AuthGate publicMode={publicMode}>
       <SecureExamOverlays
         started={secure.started}
         isBlocked={secure.isBlocked}
@@ -845,22 +1445,65 @@ export default function TakeMockTestPage() {
         requestFullscreen={secure.requestFullscreen}
       />
 
-      <div className="fixed inset-0 z-[90] flex flex-col bg-[#eef2f7] min-h-dvh select-none">
+      {stayOnPageNotice ? (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/55">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="stay-on-page-title"
+            className="w-full max-w-md rounded-2xl border border-amber-200 bg-white shadow-2xl p-6 text-center"
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">
+              Stay on this page
+            </p>
+            <h2 id="stay-on-page-title" className="text-xl font-bold text-slate-900 mb-2">
+              Don&apos;t exit the page
+            </h2>
+            <p className="text-sm text-slate-600 mb-5">{stayOnPageNotice}</p>
+            <button
+              type="button"
+              onClick={() => {
+                suppressViolations(1500);
+                setStayOnPageNotice("");
+              }}
+              className="px-5 py-2.5 rounded-lg bg-[#00448a] text-white text-sm font-semibold hover:bg-[#003a76]"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        className={`fixed inset-0 z-[90] flex flex-col bg-[#eef2f7] min-h-dvh select-none transition-all duration-700 ease-out ${
+          examEnterVisible
+            ? "opacity-100 translate-y-0 scale-100"
+            : "opacity-0 translate-y-4 scale-[0.985]"
+        }`}
+      >
         {/* Top bar */}
         <div className="bg-[#00448a] text-white shrink-0">
-          <div className="px-4 py-2 flex items-center justify-between gap-3">
+          <div className="px-3 xl:px-4 py-1.5 xl:py-2 flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-xs text-white/80 truncate">{companyLabel}</p>
-              <h1 className="text-sm sm:text-base font-bold truncate">{test.title || "Mock Test"}</h1>
+              <p className="text-[10px] xl:text-xs text-white/80 truncate">{companyLabel}</p>
+              <h1 className="text-xs sm:text-sm xl:text-base font-bold truncate">{test.title || "Mock Test"}</h1>
             </div>
-            {secure.timeLeftMs != null && (
+            {(timingEnabled && scopeTimeLeftMs != null) || secure.timeLeftMs != null ? (
               <div className="text-right shrink-0">
-                <p className="text-[10px] text-white/70 uppercase">Time Left</p>
-                <p className="text-lg font-mono font-bold tabular-nums">
-                  {secure.formatTime(secure.timeLeftMs)}
+                <p className="text-[9px] xl:text-[10px] text-white/70 uppercase">
+                  {timingEnabled && scopeTimeLeftMs != null
+                    ? scopeTiming.mode === "subsection"
+                      ? "Sub-section time"
+                      : "Section time"
+                    : "Time Left"}
+                </p>
+                <p className="text-base xl:text-lg font-mono font-bold tabular-nums">
+                  {timingEnabled && scopeTimeLeftMs != null
+                    ? formatExamTime(scopeTimeLeftMs)
+                    : secure.formatTime(secure.timeLeftMs)}
                 </p>
               </div>
-            )}
+            ) : null}
           </div>
 
           {/* Part tabs */}
@@ -869,7 +1512,7 @@ export default function TakeMockTestPage() {
               <button
                 type="button"
                 onClick={() => switchPart("mcq")}
-                className={`flex-1 py-2.5 text-sm font-medium transition ${
+                className={`flex-1 py-2 xl:py-2.5 text-xs xl:text-sm font-medium transition ${
                   part === "mcq" ? "bg-white text-[#00448a]" : "text-white/90 hover:bg-white/10"
                 }`}
               >
@@ -880,7 +1523,7 @@ export default function TakeMockTestPage() {
               <button
                 type="button"
                 onClick={() => switchPart("coding")}
-                className={`flex-1 py-2.5 text-sm font-medium transition ${
+                className={`flex-1 py-2 xl:py-2.5 text-xs xl:text-sm font-medium transition ${
                   part === "coding" ? "bg-white text-[#00448a]" : "text-white/90 hover:bg-white/10"
                 }`}
               >
@@ -892,14 +1535,20 @@ export default function TakeMockTestPage() {
 
         {/* Section tabs */}
         {sectionsInPart.length > 0 && (
-          <div className="bg-white border-b shrink-0 px-3 lg:px-4 py-1.5 lg:py-2">
-            <p className="text-[10px] lg:text-xs font-semibold text-gray-500 uppercase mb-1">Sections</p>
-            <div className="flex flex-wrap gap-1.5 lg:gap-2">
+          <div className="bg-white border-b shrink-0 px-3 xl:px-4 py-1.5 xl:py-2">
+            <p className="text-[10px] xl:text-xs font-semibold text-gray-500 uppercase mb-1">Sections</p>
+            <div className="flex flex-wrap gap-1.5 xl:gap-2">
               {sectionsInPart.map((sec) => (
                 <button
                   key={sec}
                   type="button"
                   onClick={() => {
+                    if (timingEnabled && sec !== activeSection) {
+                      showStayOnPageNotice(
+                        "Wait until this section time ends before opening another section."
+                      );
+                      return;
+                    }
                     setActiveSection(sec);
                     const subs = getMockSubSectionsForSection(
                       questions,
@@ -908,10 +1557,12 @@ export default function TakeMockTestPage() {
                     );
                     setActiveSubSection(subs[0] || "General");
                   }}
-                  className={`px-3 lg:px-4 py-1 lg:py-1.5 rounded text-xs lg:text-sm font-medium border transition ${
+                  className={`px-2.5 xl:px-4 py-1 xl:py-1.5 rounded text-[11px] xl:text-sm font-medium border transition ${
                     activeSection === sec
                       ? "bg-[#00448a] text-white border-[#00448a]"
-                      : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
+                      : timingEnabled
+                        ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
+                        : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
                   }`}
                 >
                   {sec}
@@ -919,18 +1570,32 @@ export default function TakeMockTestPage() {
               ))}
             </div>
             {subSectionsInSection.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-dashed border-gray-200">
-                <p className="text-xs font-semibold text-gray-500 uppercase mb-1.5">Sub-sections</p>
-                <div className="flex flex-wrap gap-2">
+              <div className="mt-1.5 xl:mt-2 pt-1.5 xl:pt-2 border-t border-dashed border-gray-200">
+                <p className="text-[10px] xl:text-xs font-semibold text-gray-500 uppercase mb-1 xl:mb-1.5">Sub-sections</p>
+                <div className="flex flex-wrap gap-1.5 xl:gap-2">
                   {subSectionsInSection.map((sub) => (
                     <button
                       key={sub}
                       type="button"
-                      onClick={() => setActiveSubSection(sub)}
-                      className={`px-3 py-1.5 rounded text-xs font-medium border transition ${
+                      onClick={() => {
+                        if (
+                          timingEnabled &&
+                          scopeTiming.mode === "subsection" &&
+                          sub !== activeSubSection
+                        ) {
+                          showStayOnPageNotice(
+                            "Wait until this sub-section time ends before opening another."
+                          );
+                          return;
+                        }
+                        setActiveSubSection(sub);
+                      }}
+                      className={`px-2.5 xl:px-3 py-1 xl:py-1.5 rounded text-[11px] xl:text-xs font-medium border transition ${
                         activeSubSection === sub
                           ? "bg-[#26ebe5] text-[#00448a] border-[#26ebe5]"
-                          : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
+                          : timingEnabled && scopeTiming.mode === "subsection"
+                            ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
+                            : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
                       }`}
                     >
                       {sub}
@@ -947,7 +1612,7 @@ export default function TakeMockTestPage() {
           <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
             <div
               className={`flex-1 min-h-0 ${
-                isMcq ? "overflow-y-auto p-3 lg:p-4" : "overflow-hidden p-2 sm:p-3"
+                isMcq ? "overflow-y-auto p-2.5 xl:p-4" : "overflow-hidden p-2 sm:p-3"
               }`}
             >
               {currentQ ? (
@@ -956,41 +1621,41 @@ export default function TakeMockTestPage() {
                     isMcq ? "max-w-4xl mx-auto" : "h-full min-h-0 flex flex-col"
                   }`}
                 >
-                  <div className="px-3 lg:px-4 py-2 lg:py-2.5 border-b bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                  <div className="px-3 xl:px-4 py-1.5 xl:py-2.5 border-b bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
                     <div>
-                      <p className="text-[11px] lg:text-xs text-gray-500">
+                      <p className="text-[10px] xl:text-xs text-gray-500">
                         Question Type:{" "}
                         <span className="font-semibold text-gray-800">
                           {isMcq ? "Multiple Choice" : "Coding"}
                         </span>
                       </p>
-                      <p className="text-sm font-bold text-[#00448a]">
+                      <p className="text-xs xl:text-sm font-bold text-[#00448a]">
                         Question No. {(currentPos >= 0 ? currentPos : 0) + 1}
                       </p>
                     </div>
-                    <span className="text-[11px] lg:text-xs px-2 py-1 rounded bg-[#26ebe5]/20 text-[#00448a] font-medium">
+                    <span className="text-[10px] xl:text-xs px-2 py-0.5 xl:py-1 rounded bg-[#26ebe5]/20 text-[#00448a] font-medium">
                       {activeSection}
                       {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""}
                     </span>
                   </div>
 
                   {isMcq ? (
-                    <div className="p-4 lg:p-5">
-                      <p className="text-base lg:text-[17px] font-semibold text-gray-900 leading-relaxed whitespace-pre-wrap">
+                    <div className="p-3 xl:p-5">
+                      <p className="text-sm xl:text-base font-semibold text-gray-900 leading-relaxed whitespace-pre-wrap">
                         {currentQ.question || currentQ.title || "Question"}
                       </p>
                       {currentQ.description ? (
-                        <p className="mt-3 text-sm text-gray-600 whitespace-pre-wrap">
+                        <p className="mt-2 xl:mt-3 text-xs xl:text-sm text-gray-600 whitespace-pre-wrap">
                           {currentQ.description}
                         </p>
                       ) : null}
-                      <div className="mt-4 space-y-2">
+                      <div className="mt-3 xl:mt-4 space-y-1.5 xl:space-y-2">
                         {options.map((option, optIdx) => {
                           const selected = answers[currentIdx] === optIdx;
                           return (
                             <label
                               key={optIdx}
-                              className={`flex items-start gap-3 p-2.5 lg:p-3 rounded-lg border cursor-pointer transition ${
+                              className={`flex items-start gap-2.5 xl:gap-3 p-2 xl:p-3 rounded-lg border cursor-pointer transition ${
                                 selected
                                   ? "border-[#00448a] bg-blue-50"
                                   : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
@@ -1001,10 +1666,10 @@ export default function TakeMockTestPage() {
                                 name={`q-${currentIdx}`}
                                 checked={selected}
                                 onChange={() => setAnswers((p) => ({ ...p, [currentIdx]: optIdx }))}
-                                className="mt-1 shrink-0"
+                                className="mt-0.5 xl:mt-1 shrink-0"
                               />
-                              <span className="text-sm text-gray-800">
-                                <span className="font-semibold mr-2">
+                              <span className="text-xs xl:text-sm text-gray-800 leading-snug">
+                                <span className="font-semibold mr-1.5 xl:mr-2">
                                   {String.fromCharCode(65 + optIdx)}.
                                 </span>
                                 {option || `Option ${optIdx + 1}`}
@@ -1016,22 +1681,22 @@ export default function TakeMockTestPage() {
                     </div>
                   ) : (
                     <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-                      <div className="min-h-0 overflow-y-auto p-3 lg:p-4 border-b lg:border-b-0 lg:border-r space-y-3">
-                        <div className="rounded-xl border border-gray-200 bg-slate-50/70 px-3 py-3">
-                          <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                      <div className="min-h-0 overflow-y-auto p-2.5 xl:p-4 border-b lg:border-b-0 lg:border-r space-y-2.5 xl:space-y-3">
+                        <div className="rounded-xl border border-gray-200 bg-slate-50/70 px-2.5 xl:px-3 py-2 xl:py-3">
+                          <p className="text-[10px] xl:text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5 xl:mb-2">
                             Problem statement
                           </p>
-                          <pre className="text-sm text-gray-900 leading-relaxed whitespace-pre-wrap font-sans">
+                          <pre className="text-xs xl:text-sm text-gray-900 leading-relaxed whitespace-pre-wrap font-sans">
                             {currentQ.question || currentQ.title || "Question"}
                           </pre>
                         </div>
                         {currentQ.description ? (
-                          <p className="text-sm text-gray-600 whitespace-pre-wrap">
+                          <p className="text-xs xl:text-sm text-gray-600 whitespace-pre-wrap">
                             {currentQ.description}
                           </p>
                         ) : null}
                         {(currentQ.testCases || []).length > 0 && (
-                          <div className="rounded-lg border bg-gray-50 p-3 text-xs">
+                          <div className="rounded-lg border bg-gray-50 p-2.5 xl:p-3 text-[11px] xl:text-xs">
                             <p className="font-semibold mb-2">Sample test cases</p>
                             {(currentQ.testCases || []).slice(0, 2).map((tc, i) => (
                               <div key={i} className="grid grid-cols-1 xl:grid-cols-2 gap-2 mb-2 last:mb-0">
@@ -1046,14 +1711,14 @@ export default function TakeMockTestPage() {
                           </div>
                         )}
                       </div>
-                      <div className="min-h-[240px] lg:min-h-0 flex flex-col p-3">
+                      <div className="min-h-[240px] lg:min-h-0 flex flex-col p-2.5 xl:p-3">
                         <div className="flex flex-wrap items-center gap-2 mb-2 shrink-0">
                           <select
                             value={codeLanguages[currentIdx] || currentQ.language || "javascript"}
                             onChange={(e) =>
                               setCodeLanguages((p) => ({ ...p, [currentIdx]: e.target.value }))
                             }
-                            className="border rounded px-2.5 py-1.5 text-sm"
+                            className="border rounded px-2 py-1 xl:px-2.5 xl:py-1.5 text-xs xl:text-sm"
                           >
                             <option value="javascript">JavaScript</option>
                             <option value="python">Python</option>
@@ -1065,7 +1730,7 @@ export default function TakeMockTestPage() {
                             type="button"
                             onClick={handleRunCode}
                             disabled={runLoading[currentIdx]}
-                            className="px-3 py-1.5 rounded bg-[#00448a] text-white text-sm disabled:opacity-60"
+                            className="px-2.5 xl:px-3 py-1 xl:py-1.5 rounded bg-[#00448a] text-white text-xs xl:text-sm disabled:opacity-60"
                           >
                             {runLoading[currentIdx] ? "Running..." : "Run Code"}
                           </button>
@@ -1073,12 +1738,12 @@ export default function TakeMockTestPage() {
                         <textarea
                           value={answers[currentIdx] ?? currentQ.starterCode ?? ""}
                           onChange={(e) => setAnswers((p) => ({ ...p, [currentIdx]: e.target.value }))}
-                          className="w-full flex-1 min-h-[180px] lg:min-h-0 border rounded-lg px-3 py-2 font-mono text-sm resize-y lg:resize-none select-text"
+                          className="w-full flex-1 min-h-[180px] lg:min-h-0 border rounded-lg px-2.5 xl:px-3 py-1.5 xl:py-2 font-mono text-xs xl:text-sm resize-y lg:resize-none select-text"
                           spellCheck={false}
                         />
                         {codingResults.length > 0 && (
                           <div className="mt-2 shrink-0 max-h-44 overflow-y-auto space-y-2">
-                            <div className="text-xs lg:text-sm space-y-1">
+                            <div className="text-[11px] xl:text-sm space-y-1">
                               {codingResults.map((r, i) => (
                                 <p
                                   key={i}
@@ -1102,11 +1767,11 @@ export default function TakeMockTestPage() {
                               ))}
                             </div>
                             {codingResults.some((r) => r.error && !r.skipped) ? (
-                              <div className="rounded-lg border border-red-300 bg-red-50 p-2.5">
-                                <p className="text-[11px] font-semibold text-red-800 uppercase tracking-wide mb-1">
+                              <div className="rounded-lg border border-red-300 bg-red-50 p-2 xl:p-2.5">
+                                <p className="text-[10px] xl:text-[11px] font-semibold text-red-800 uppercase tracking-wide mb-1">
                                   Compiler / runtime error
                                 </p>
-                                <pre className="text-[11px] leading-relaxed text-red-800 whitespace-pre-wrap font-mono">
+                                <pre className="text-[10px] xl:text-[11px] leading-relaxed text-red-800 whitespace-pre-wrap font-mono">
                                   {codingResults.find((r) => r.error && !r.skipped)?.error}
                                 </pre>
                               </div>
@@ -1118,19 +1783,19 @@ export default function TakeMockTestPage() {
                   )}
 
                   {/* Action bar */}
-                  <div className="px-3 lg:px-4 py-2 lg:py-2.5 border-t bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
-                    <div className="flex flex-wrap gap-2">
+                  <div className="px-3 xl:px-4 py-1.5 xl:py-2.5 border-t bg-gray-50 flex flex-wrap items-center justify-between gap-2 shrink-0">
+                    <div className="flex flex-wrap gap-1.5 xl:gap-2">
                       <button
                         type="button"
                         onClick={() => goNext(true)}
-                        className="px-3 lg:px-4 py-1.5 lg:py-2 rounded border border-purple-300 bg-purple-50 text-purple-800 text-xs lg:text-sm font-medium hover:bg-purple-100"
+                        className="px-2.5 xl:px-4 py-1 xl:py-2 rounded border border-purple-300 bg-purple-50 text-purple-800 text-[11px] xl:text-sm font-medium hover:bg-purple-100"
                       >
                         Mark for Review &amp; Next
                       </button>
                       <button
                         type="button"
                         onClick={clearCurrentResponse}
-                        className="px-3 lg:px-4 py-1.5 lg:py-2 rounded border border-gray-300 bg-white text-gray-700 text-xs lg:text-sm font-medium hover:bg-gray-50"
+                        className="px-2.5 xl:px-4 py-1 xl:py-2 rounded border border-gray-300 bg-white text-gray-700 text-[11px] xl:text-sm font-medium hover:bg-gray-50"
                       >
                         Clear Response
                       </button>
@@ -1139,7 +1804,7 @@ export default function TakeMockTestPage() {
                       type="button"
                       onClick={() => goNext(false)}
                       disabled={!canGoNext}
-                      className="px-4 lg:px-5 py-1.5 lg:py-2 rounded bg-[#00448a] hover:bg-[#003a76] text-white text-xs lg:text-sm font-medium disabled:opacity-40"
+                      className="px-3 xl:px-5 py-1 xl:py-2 rounded bg-[#00448a] hover:bg-[#003a76] text-white text-[11px] xl:text-sm font-medium disabled:opacity-40"
                     >
                       {currentPos >= sectionQuestions.length - 1 && canContinueToCoding
                         ? "Go to Coding"
@@ -1148,24 +1813,24 @@ export default function TakeMockTestPage() {
                   </div>
                 </div>
               ) : (
-                <p className="text-center text-gray-500 py-12">No questions in this section.</p>
+                <p className="text-center text-xs xl:text-sm text-gray-500 py-12">No questions in this section.</p>
               )}
             </div>
           </div>
 
           {/* Right sidebar — question palette */}
-          <aside className="hidden sm:flex w-[13.5rem] lg:w-[13.75rem] xl:w-72 shrink-0 border-l border-gray-300 bg-white flex-col overflow-hidden">
-            <div className="p-3 lg:p-3 xl:p-4 border-b bg-gradient-to-b from-gray-50 to-white">
-              <p className="text-[10px] lg:text-xs text-gray-500 uppercase font-semibold">Question Palette</p>
-              <p className="text-sm font-medium text-[#00448a] mt-1">
+          <aside className="hidden sm:flex w-[12.5rem] lg:w-[13rem] xl:w-72 shrink-0 border-l border-gray-300 bg-white flex-col overflow-hidden">
+            <div className="p-2.5 xl:p-4 border-b bg-gradient-to-b from-gray-50 to-white">
+              <p className="text-[10px] xl:text-xs text-gray-500 uppercase font-semibold">Question Palette</p>
+              <p className="text-xs xl:text-sm font-medium text-[#00448a] mt-0.5 xl:mt-1">
                 {activeSection}
                 {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""} ·{" "}
                 {part === "mcq" ? "MCQ" : "Coding"}
               </p>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3">
-              <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5 lg:gap-2">
+            <div className="flex-1 overflow-y-auto p-2.5 xl:p-3">
+              <div className="grid grid-cols-4 xl:grid-cols-5 gap-1.5 xl:gap-2">
                 {sectionQuestions.map(({ index }, localIdx) => {
                   const status = getStatus(index);
                   const isCurrent = index === currentIdx;
@@ -1174,7 +1839,7 @@ export default function TakeMockTestPage() {
                       key={index}
                       type="button"
                       onClick={() => goToQuestion(index)}
-                      className={`h-10 w-full rounded border text-sm font-semibold transition ${paletteButtonClass(status, isCurrent)}`}
+                      className={`h-8 xl:h-10 w-full rounded border text-xs xl:text-sm font-semibold transition ${paletteButtonClass(status, isCurrent)}`}
                       title={`Question ${localIdx + 1}`}
                     >
                       {localIdx + 1}
@@ -1184,36 +1849,36 @@ export default function TakeMockTestPage() {
               </div>
 
               {/* Legend */}
-              <div className="mt-4 space-y-1.5 text-[11px] lg:text-xs">
-                <p className="font-semibold text-gray-700 mb-2">Legend</p>
+              <div className="mt-3 xl:mt-4 space-y-1 xl:space-y-1.5 text-[10px] xl:text-xs">
+                <p className="font-semibold text-gray-700 mb-1.5 xl:mb-2">Legend</p>
                 <div className="flex items-center gap-2">
-                  <span className="h-4 w-4 rounded bg-green-500 shrink-0" />
+                  <span className="h-3.5 w-3.5 xl:h-4 xl:w-4 rounded bg-green-500 shrink-0" />
                   <span>Answered</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="h-4 w-4 rounded bg-red-500 shrink-0" />
+                  <span className="h-3.5 w-3.5 xl:h-4 xl:w-4 rounded bg-red-500 shrink-0" />
                   <span>Not Answered</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="h-4 w-4 rounded bg-purple-500 shrink-0" />
+                  <span className="h-3.5 w-3.5 xl:h-4 xl:w-4 rounded bg-purple-500 shrink-0" />
                   <span>Marked for Review</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="h-4 w-4 rounded bg-white border border-gray-300 shrink-0" />
+                  <span className="h-3.5 w-3.5 xl:h-4 xl:w-4 rounded bg-white border border-gray-300 shrink-0" />
                   <span>Not Visited</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="h-4 w-4 rounded bg-orange-500 shrink-0" />
+                  <span className="h-3.5 w-3.5 xl:h-4 xl:w-4 rounded bg-orange-500 shrink-0" />
                   <span>Current Question</span>
                 </div>
               </div>
             </div>
 
-            <div className="p-3 border-t bg-gray-50 space-y-2">
+            <div className="p-2.5 xl:p-3 border-t bg-gray-50 space-y-2">
               <button
                 type="button"
                 onClick={handleSubmit}
-                className={`w-full py-2.5 rounded-lg text-white font-semibold text-sm ${
+                className={`w-full py-2 xl:py-2.5 rounded-lg text-white font-semibold text-xs xl:text-sm ${
                   canContinueToCoding
                     ? "bg-[#00448a] hover:bg-[#003a76]"
                     : "bg-green-600 hover:bg-green-700"
@@ -1259,6 +1924,14 @@ export default function TakeMockTestPage() {
           </div>
         </div>
       </div>
-    </CheckAuth>
+    </AuthGate>
+  );
+}
+
+export default function TakeMockTestPageWithSuspense() {
+  return (
+    <Suspense fallback={<ExamPageSkeleton />}>
+      <TakeMockTestPage />
+    </Suspense>
   );
 }

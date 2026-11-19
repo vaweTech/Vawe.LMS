@@ -84,9 +84,9 @@ export default function RootLayout({ children }) {
     <html lang="en-IN">
       <head>
         <link rel="canonical" href="https://skillwins.in" />
-        <link rel="apple-touch-icon" href="/vawe-emblem.png" />
-        <link rel="icon" type="image/png" href="/vawe-emblem.png" />
-        <link rel="shortcut icon" href="/vawe-emblem.png" />
+        <link rel="apple-touch-icon" href="/vawe-emblem-nav.png" />
+        <link rel="icon" type="image/png" href="/vawe-emblem-nav.png" />
+        <link rel="shortcut icon" href="/vawe-emblem-nav.png" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#2563eb" />
         <meta name="geo.region" content="IN-AP" />

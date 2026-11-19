@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, useEffect, useMemo } from "react";
+import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import CheckAuth from "../../lib/CheckAuth";
@@ -297,8 +297,10 @@ async function mirrorTrainerAttendanceToCrtStudentProfiles(db, cls, ch, dateStr,
 
 const TRAINER_ROLES = ["crtTrainer", "trainer", "admin", "superadmin"];
 
-function DaySessionStatus({ meta, onNotHeld, disabled }) {
+function DaySessionStatus({ meta, onNotHeld, disabled, isToday = false, onToggleFaceCheckIn }) {
   const notHeld = meta?.status === SESSION_NOT_HELD;
+  const faceOpen = meta?.faceCheckInOpen === true;
+  const faceCount = Object.keys(meta?.faceCheckins || {}).length;
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs">
       {notHeld ? (
@@ -321,6 +323,30 @@ function DaySessionStatus({ meta, onNotHeld, disabled }) {
         >
           Class not held
         </button>
+      )}
+      {!notHeld && isToday && onToggleFaceCheckIn && (
+        <button
+          type="button"
+          onClick={() => onToggleFaceCheckIn(!faceOpen)}
+          disabled={disabled}
+          className={`px-2.5 py-1 rounded-lg border font-medium disabled:opacity-60 ${
+            faceOpen
+              ? "border-rose-300 text-rose-700 hover:bg-rose-50"
+              : "border-sky-300 text-sky-800 hover:bg-sky-50"
+          }`}
+        >
+          {faceOpen ? "Close face check-in" : "Open face check-in"}
+        </button>
+      )}
+      {faceOpen && (
+        <span className="font-semibold text-sky-800 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
+          Students can check in by face now
+        </span>
+      )}
+      {faceCount > 0 && (
+        <span className="text-sky-800">
+          {faceCount} face check-in{faceCount === 1 ? "" : "s"}
+        </span>
       )}
     </div>
   );
@@ -633,6 +659,9 @@ export default function CRTTrainerPage() {
     }));
   };
 
+  /** dayKey → present ids when the sheet was loaded; face check-ins outside it arrived later and are kept on save. */
+  const loadedPresentRef = useRef({});
+
   const loadTrainerAttendanceForChapters = useCallback(async (cls, chapters, students) => {
     if (!db || !students.length) return;
     const dateStr = attendanceDate;
@@ -655,6 +684,7 @@ export default function CRTTrainerPage() {
           const data = snap.exists() ? snap.data() || {} : null;
           const presentArr = data?.present;
           const presentSet = new Set(Array.isArray(presentArr) ? presentArr : []);
+          loadedPresentRef.current[dayKey] = presentSet;
           const row = {};
           for (const s of students) {
             const pid = s.studentId || s.id;
@@ -668,6 +698,10 @@ export default function CRTTrainerPage() {
                   status: data.status === SESSION_NOT_HELD ? SESSION_NOT_HELD : "held",
                   markedBy: data.markedBy || null,
                   markedByName: data.markedByName || "",
+                  faceCheckins: data.faceCheckins || {},
+                  faceCheckInOpen: data.faceCheckInOpen === true,
+                  docId: ref.id,
+                  batchKey: `${cls.programId}__${cls.batchId}`,
                 }
               : null,
           }));
@@ -752,6 +786,19 @@ export default function CRTTrainerPage() {
         );
         if (!ok) return;
       }
+      let dayRow = attendanceByDay[dayKey] || {};
+      if (!notHeld) {
+        const loaded = loadedPresentRef.current[dayKey] || new Set();
+        const lateFace = new Set(
+          Object.keys(prev?.faceCheckins || {}).filter((pid) => !loaded.has(pid) && !presentList.includes(pid))
+        );
+        const late = students.filter((s) => lateFace.has(s.studentId || s.id));
+        if (late.length) {
+          presentList.push(...late.map((s) => s.studentId || s.id));
+          dayRow = { ...dayRow, ...Object.fromEntries(late.map((s) => [s.id, true])) };
+          setAttendanceByDay((p) => ({ ...p, [dayKey]: { ...(p[dayKey] || {}), ...dayRow } }));
+        }
+      }
       const markedByName = trainerDisplayName || me?.email || "";
       const status = notHeld ? SESSION_NOT_HELD : "held";
       await setDoc(
@@ -772,6 +819,7 @@ export default function CRTTrainerPage() {
           rosterSize: students.length,
           markedBy: me?.uid || null,
           markedByName,
+          ...(notHeld ? { faceCheckInOpen: false } : {}),
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -789,7 +837,19 @@ export default function CRTTrainerPage() {
       } catch (historyErr) {
         console.warn("[crtTrainar] attendance history write failed:", historyErr);
       }
-      setDaySessionMeta((p) => ({ ...p, [dayKey]: { status, markedBy: me?.uid || null, markedByName } }));
+      loadedPresentRef.current[dayKey] = new Set(presentList);
+      setDaySessionMeta((p) => ({
+        ...p,
+        [dayKey]: {
+          status,
+          markedBy: me?.uid || null,
+          markedByName,
+          faceCheckins: prev?.faceCheckins || {},
+          faceCheckInOpen: !notHeld && prev?.faceCheckInOpen === true,
+          docId: ref.id,
+          batchKey: `${cls.programId}__${cls.batchId}`,
+        },
+      }));
       if (notHeld) {
         setAttendanceByDay((p) => ({
           ...p,
@@ -804,7 +864,7 @@ export default function CRTTrainerPage() {
             ch,
             dateStr,
             students,
-            attendanceByDay,
+            { [dayKey]: dayRow },
             dayKey
           );
         } catch (mirrorErr) {
@@ -820,6 +880,108 @@ export default function CRTTrainerPage() {
       setDayAttendanceSavingKey(null);
     }
   };
+
+  /** Opens / closes face check-in for today's class; creates the day's sheet (nobody present yet) if needed. */
+  const handleToggleFaceCheckIn = async (cls, ch, open) => {
+    if (!db || !cls?.batchId || !ch?.id) return;
+    const dateStr = getTodayStr();
+    const dayKey = attendanceDayKey(cls, ch, dateStr);
+    const students = getBatchStudents(cls);
+    const me = auth?.currentUser;
+    const ref = doc(db, "attendance", trainerAttendanceDocId(cls.programId, cls.batchId, cls.courseId, ch.id, dateStr));
+    setDayAttendanceSavingKey(dayKey);
+    try {
+      const existing = await getDoc(ref);
+      const base = {
+        type: "trainer",
+        courseId: cls.courseId,
+        chapterId: ch.id,
+        crtProgramId: cls.programId,
+        batchId: cls.batchId,
+        date: dateStr,
+        faceCheckInOpen: open,
+        faceCheckInUpdatedBy: me?.uid || null,
+        updatedAt: serverTimestamp(),
+      };
+      if (!existing.exists()) {
+        Object.assign(base, {
+          status: "held",
+          present: [],
+          roster: students.map((s) => s.studentId || s.id),
+          rosterNames: Object.fromEntries(
+            students.map((s) => [s.studentId || s.id, s.rollNo ? `${s.name} (${s.rollNo})` : s.name])
+          ),
+          rosterSize: students.length,
+          markedBy: null,
+          markedByName: "Face check-in",
+        });
+        loadedPresentRef.current[dayKey] = new Set();
+      }
+      await setDoc(ref, base, { merge: true });
+      const data = existing.exists() ? existing.data() || {} : {};
+      setDaySessionMeta((p) => ({
+        ...p,
+        [dayKey]: {
+          status: data.status === SESSION_NOT_HELD ? SESSION_NOT_HELD : "held",
+          markedBy: data.markedBy || null,
+          markedByName: data.markedByName || "Face check-in",
+          faceCheckins: data.faceCheckins || {},
+          faceCheckInOpen: open,
+          docId: ref.id,
+          batchKey: `${cls.programId}__${cls.batchId}`,
+        },
+      }));
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "Could not update face check-in.");
+    } finally {
+      setDayAttendanceSavingKey(null);
+    }
+  };
+
+  const studentsByBatchRef = useRef(studentsByBatch);
+  useEffect(() => {
+    studentsByBatchRef.current = studentsByBatch;
+  }, [studentsByBatch]);
+
+  const openFaceDays = useMemo(
+    () =>
+      Object.entries(daySessionMeta)
+        .filter(([, m]) => m?.faceCheckInOpen && m.docId)
+        .map(([dayKey, m]) => `${dayKey}|${m.docId}|${m.batchKey}`)
+        .sort()
+        .join("\n"),
+    [daySessionMeta]
+  );
+
+  /** While face check-in is open, tick students present as they check in (unsaved trainer edits are kept). */
+  useEffect(() => {
+    if (!db || !openFaceDays) return;
+    const unsubs = openFaceDays.split("\n").map((line) => {
+      const [dayKey, docId, batchKey] = line.split("|");
+      return onSnapshot(
+        doc(db, "attendance", docId),
+        (snap) => {
+          const face = snap.data()?.faceCheckins || {};
+          setDaySessionMeta((p) => (p[dayKey] ? { ...p, [dayKey]: { ...p[dayKey], faceCheckins: face } } : p));
+          const loaded = loadedPresentRef.current[dayKey] || new Set();
+          const fresh = (studentsByBatchRef.current[batchKey] || []).filter((s) => {
+            const pid = s.studentId || s.id;
+            return face[pid] && !loaded.has(pid);
+          });
+          if (!fresh.length) return;
+          fresh.forEach((s) => loaded.add(s.studentId || s.id));
+          loadedPresentRef.current[dayKey] = loaded;
+          setAttendanceByDay((p) => ({
+            ...p,
+            [dayKey]: { ...(p[dayKey] || {}), ...Object.fromEntries(fresh.map((s) => [s.id, true])) },
+          }));
+        },
+        (err) => console.warn("[crtTrainar] face check-in listener", err)
+      );
+    });
+    return () => unsubs.forEach((u) => u());
+  }, [openFaceDays]);
 
   useEffect(() => {
     if (activeModal !== "unlock" || !selectedClass || !db) {
@@ -2003,6 +2165,8 @@ export default function CRTTrainerPage() {
                                                 meta={daySessionMeta[dayKey]}
                                                 disabled={saving || !isFirebaseConfigured || batchStudents.length === 0}
                                                 onNotHeld={() => handleSaveDayAttendance(cls, ch, { notHeld: true })}
+                                                isToday={dateStr === getTodayStr()}
+                                                onToggleFaceCheckIn={(open) => handleToggleFaceCheckIn(cls, ch, open)}
                                               />
                                               {justSaved && (
                                                 <div className="flex items-center gap-2 text-sm text-emerald-700 font-medium">
@@ -2028,6 +2192,11 @@ export default function CRTTrainerPage() {
                                                         <div className="min-w-0">
                                                           <p className="font-medium text-slate-900 text-sm">
                                                             {student.name}
+                                                            {daySessionMeta[dayKey]?.faceCheckins?.[student.studentId || student.id] && (
+                                                              <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                                                                Face check-in
+                                                              </span>
+                                                            )}
                                                           </p>
                                                           <p className="text-xs text-slate-500 truncate">
                                                             {student.rollNo}
@@ -2226,6 +2395,10 @@ export default function CRTTrainerPage() {
                                           onNotHeld={() =>
                                             handleSaveDayAttendance(selectedClass, activeChapter, { notHeld: true })
                                           }
+                                          isToday={dateStr === getTodayStr()}
+                                          onToggleFaceCheckIn={(open) =>
+                                            handleToggleFaceCheckIn(selectedClass, activeChapter, open)
+                                          }
                                         />
                                       </div>
                                       {justSavedAttendance && (
@@ -2248,7 +2421,14 @@ export default function CRTTrainerPage() {
                                                 className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-3 py-2.5 bg-white hover:bg-slate-50/50"
                                               >
                                                 <div className="min-w-0">
-                                                  <p className="font-medium text-slate-900 text-sm">{student.name}</p>
+                                                  <p className="font-medium text-slate-900 text-sm">
+                                                    {student.name}
+                                                    {daySessionMeta[dayKey]?.faceCheckins?.[student.studentId || student.id] && (
+                                                      <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                                                        Face check-in
+                                                      </span>
+                                                    )}
+                                                  </p>
                                                   <p className="text-xs text-slate-500 truncate">
                                                     {student.rollNo}
                                                     {student.rollNo && student.email ? " · " : ""}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import Papa from "papaparse";
@@ -19,13 +20,26 @@ import {
   getMockQuestionSubSection,
   getMockTestCompanyLabel,
   isMockTestLocked,
+  mockSubSectionTimingKey,
   normalizeMockCompanyNames,
+  normalizeMockSectionTimings,
+  normalizeMockSubSectionTimings,
   sanitizeMockQuestions,
   summarizeMockTestQuestions,
   unblockMockTestAccount,
   updateMockTest,
   updateMockTestGroup,
 } from "@/lib/mockTests";
+import {
+  MOCK_PUBLIC_MODE_RANDOM,
+  MOCK_PUBLIC_MODE_SEQUENTIAL,
+  buildMockPublicJoinUrl,
+  createMockPublicLink, 
+  deleteMockPublicLink,
+  fetchMockPublicLinks,
+  qrCodeImageUrl, 
+  updateMockPublicLink,
+} from "@/lib/mockTestPublicLinks";
 import { parseDayMcqRows } from "@/lib/dayMcqUpload";
 import { ListRowSkeleton, StatsSkeleton } from "@/components/PageSkeleton";
 import {
@@ -33,10 +47,12 @@ import {
   Clock,
   Code2,
   FileQuestion,
+  Link2,
   ListChecks,
   Lock,
   Pencil,
   Plus,
+  QrCode,
   Save,
   Settings2,
   ShieldAlert,
@@ -389,6 +405,17 @@ export default function AdminMockTestCompanyPage() {
   const [activeCodingScope, setActiveCodingScope] = useState(SCOPE_ALL);
   const [imageUploadKey, setImageUploadKey] = useState("");
   const [uploadPreview, setUploadPreview] = useState(null);
+  const [sectionTimings, setSectionTimings] = useState({});
+  const [subSectionTimings, setSubSectionTimings] = useState({});
+  const [publicLinks, setPublicLinks] = useState([]);
+  const [publicLinksLoading, setPublicLinksLoading] = useState(false);
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkTestIds, setLinkTestIds] = useState([]);
+  const [linkMode, setLinkMode] = useState("");
+  const [showLinkModeModal, setShowLinkModeModal] = useState(false);
+  const [creatingLink, setCreatingLink] = useState(false);
+  const [copiedLinkId, setCopiedLinkId] = useState("");
+  const [linkOrigin, setLinkOrigin] = useState("");
 
   const mcqDrafts = useMemo(
     () => questionDrafts.filter((q) => (q?.type || "mcq") === "mcq"),
@@ -487,10 +514,29 @@ export default function AdminMockTestCompanyPage() {
     setQuestionEditId(null);
     setQuestionDrafts([]);
     setSectionMap({});
+    setSectionTimings({});
+    setSubSectionTimings({});
     setUploadInfo("");
   }
 
   const companyLabel = getMockTestCompanyLabel(companySlug, group ? [group] : undefined);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") setLinkOrigin(window.location.origin);
+  }, []);
+
+  const loadPublicLinks = useCallback(async () => {
+    if (!companySlug) return;
+    setPublicLinksLoading(true);
+    try {
+      const list = await fetchMockPublicLinks(companySlug);
+      setPublicLinks(list);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setPublicLinksLoading(false);
+    }
+  }, [companySlug]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -509,17 +555,100 @@ export default function AdminMockTestCompanyPage() {
         byTest[t.id] = blockLists[i] || [];
       });
       setLockedAccountsByTest(byTest);
+      loadPublicLinks();
     } catch (e) {
       console.error(e);
       alert(e?.message || "Failed to load mock tests.");
     } finally {
       setLoading(false);
     }
-  }, [companySlug]);
+  }, [companySlug, loadPublicLinks]);
 
   useEffect(() => {
     if (companySlug) loadData();
   }, [companySlug, loadData]);
+
+  function toggleLinkTest(testId) {
+    setLinkTestIds((prev) =>
+      prev.includes(testId) ? prev.filter((id) => id !== testId) : [...prev, testId]
+    );
+    setLinkMode("");
+  }
+
+  function moveLinkTest(index, delta) {
+    setLinkTestIds((prev) => {
+      const next = [...prev];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
+
+  async function finalizeCreatePublicLink(mode) {
+    if (linkTestIds.length < 1) {
+      alert("Select at least one test.");
+      return;
+    }
+    if (linkTestIds.length > 1 && !mode) {
+      alert("Choose random or one-by-one.");
+      return;
+    }
+    setCreatingLink(true);
+    try {
+      const testTitles = linkTestIds.map(
+        (id) => tests.find((t) => t.id === id)?.title || "Mock Test"
+      );
+      const created = await createMockPublicLink({
+        companySlug,
+        label: linkLabel,
+        testIds: linkTestIds,
+        testTitles,
+        mode: linkTestIds.length > 1 ? mode : undefined,
+      });
+      setLinkLabel("");
+      setLinkTestIds([]);
+      setLinkMode("");
+      setShowLinkModeModal(false);
+      await loadPublicLinks();
+      const url = buildMockPublicJoinUrl(created.id, linkOrigin || window.location.origin);
+      alert(
+        created.mode === MOCK_PUBLIC_MODE_SEQUENTIAL
+          ? `Public link created.\nCandidates take all selected tests one by one.\n${url}`
+          : linkTestIds.length > 1
+            ? `Public link created.\nEach candidate gets one random paper.\n${url}`
+            : `Public link created.\n${url}`
+      );
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to create public link.");
+    } finally {
+      setCreatingLink(false);
+    }
+  }
+
+  function handleGeneratePublicLink() {
+    if (linkTestIds.length < 1) {
+      alert("Select at least one test for the public link.");
+      return;
+    }
+    if (linkTestIds.length === 1) {
+      finalizeCreatePublicLink(undefined);
+      return;
+    }
+    setShowLinkModeModal(true);
+  }
+
+  async function copyPublicLink(id) {
+    const url = buildMockPublicJoinUrl(id, linkOrigin || window.location.origin);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLinkId(id);
+      setTimeout(() => setCopiedLinkId(""), 2000);
+    } catch {
+      window.prompt("Copy this link:", url);
+    }
+  }
 
   async function handleCreateTest(e) {
     e.preventDefault();
@@ -703,6 +832,8 @@ export default function AdminMockTestCompanyPage() {
         : [ensureDraftId(createEmptyMockQuestion(), 0)];
       setQuestionDrafts(loaded);
       setSectionMap(buildMockSectionMap(loaded));
+      setSectionTimings(normalizeMockSectionTimings(test?.sectionTimings));
+      setSubSectionTimings(normalizeMockSubSectionTimings(test?.subSectionTimings));
       setUploadInfo("");
     } catch (err) {
       alert(err?.message || "Failed to load questions.");
@@ -839,9 +970,15 @@ export default function AdminMockTestCompanyPage() {
     }
     setSaving(true);
     try {
-      await updateMockTest(companySlug, questionEditId, { questions: cleaned });
+      await updateMockTest(companySlug, questionEditId, {
+        questions: cleaned,
+        sectionTimings: normalizeMockSectionTimings(sectionTimings),
+        subSectionTimings: normalizeMockSubSectionTimings(subSectionTimings),
+      });
       setQuestionEditId(null);
       setQuestionDrafts([]);
+      setSectionTimings({});
+      setSubSectionTimings({});
       await loadData();
       alert("Questions saved.");
     } catch (err) {
@@ -1056,6 +1193,124 @@ export default function AdminMockTestCompanyPage() {
         </div>
       ) : null}
 
+      {showLinkModeModal ? (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center p-4 bg-black/50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="public-link-mode-title"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
+              <div>
+                <h2 id="public-link-mode-title" className="text-lg font-bold text-slate-900">
+                  How should candidates get these tests?
+                </h2>
+                <p className="text-sm text-slate-500 mt-1">
+                  You selected {linkTestIds.length} tests. Choose one option.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLinkModeModal(false);
+                  setLinkMode("");
+                }}
+                className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3">
+              {[
+                {
+                  value: MOCK_PUBLIC_MODE_RANDOM,
+                  title: "Random question paper",
+                  hint: "When a candidate opens the link, they get one random paper from the selected tests.",
+                },
+                {
+                  value: MOCK_PUBLIC_MODE_SEQUENTIAL,
+                  title: "One by one — all tests",
+                  hint: "Each candidate takes every selected test, in the order below.",
+                },
+              ].map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`flex items-start gap-3 rounded-xl border px-3 py-3 cursor-pointer ${
+                    linkMode === opt.value
+                      ? "border-[#00448a]/40 bg-[#00448a]/5"
+                      : "border-slate-100 hover:border-slate-200"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="mock-public-link-mode"
+                    value={opt.value}
+                    checked={linkMode === opt.value}
+                    onChange={() => setLinkMode(opt.value)}
+                    className="mt-1 text-[#00448a] focus:ring-[#00448a]"
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-slate-900">{opt.title}</span>
+                    <span className="block text-xs text-slate-500 mt-0.5">{opt.hint}</span>
+                  </span>
+                </label>
+              ))}
+
+              {!linkMode ? (
+                <p className="text-xs font-medium text-amber-700">Please choose one option to continue.</p>
+              ) : null}
+
+              {linkMode === MOCK_PUBLIC_MODE_SEQUENTIAL ? (
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                    Test order
+                  </p>
+                  <ol className="space-y-2">
+                    {linkTestIds.map((id, i) => (
+                      <li
+                        key={id}
+                        className="flex items-center gap-3 rounded-lg border border-slate-100 bg-slate-50/60 px-3 py-2"
+                      >
+                        <span className="w-6 text-sm font-semibold text-[#00448a]">{i + 1}.</span>
+                        <span className="flex-1 min-w-0 truncate text-sm text-slate-900">
+                          {tests.find((t) => t.id === id)?.title || "Untitled"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => moveLinkTest(i, -1)}
+                          disabled={i === 0}
+                          className="px-2 py-1 text-xs rounded-md border border-slate-200 bg-white disabled:opacity-40"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveLinkTest(i, 1)}
+                          disabled={i === linkTestIds.length - 1}
+                          className="px-2 py-1 text-xs rounded-md border border-slate-200 bg-white disabled:opacity-40"
+                        >
+                          ↓
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => finalizeCreatePublicLink(linkMode)}
+                disabled={creatingLink || !linkMode}
+                className="w-full mt-2 px-4 py-3 text-sm font-semibold rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] disabled:opacity-60"
+              >
+                {creatingLink ? "Generating…" : "Generate link & QR code"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {lockedAccountsModalTestId ? (() => {
         const modalTest = tests.find((t) => t.id === lockedAccountsModalTestId);
         const modalAccounts = lockedAccountsByTest[lockedAccountsModalTestId] || [];
@@ -1202,6 +1457,246 @@ export default function AdminMockTestCompanyPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+
+              <div className="mb-5 md:mb-6 grid gap-5 lg:grid-cols-2">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
+                  <div className="flex items-start gap-3 mb-4">
+                    <div className="h-10 w-10 rounded-xl bg-[#00448a]/10 text-[#00448a] flex items-center justify-center shrink-0">
+                      <Link2 className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="font-semibold text-slate-900">Public test link</h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        No LMS login. Candidates enter name, college, branch, and verify mobile on WhatsApp.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Link label (optional)</label>
+                    <input
+                      value={linkLabel}
+                      onChange={(e) => setLinkLabel(e.target.value)}
+                      placeholder="e.g. Campus drive — Day 1"
+                      className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                    />
+                  </div>
+
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                    Select tests
+                  </p>
+                  {tests.length === 0 ? (
+                    <p className="text-sm text-slate-500 mb-3">Create a test first, then generate a public link.</p>
+                  ) : (
+                    <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-100 divide-y divide-slate-100 mb-3">
+                      {tests.map((test) => {
+                        const checked = linkTestIds.includes(test.id);
+                        return (
+                          <label
+                            key={test.id}
+                            className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer ${
+                              checked ? "bg-[#00448a]/5" : "hover:bg-slate-50"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleLinkTest(test.id)}
+                              className="rounded border-slate-300 text-[#00448a] focus:ring-[#00448a]"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-sm text-slate-900">
+                              {test.title || "Untitled test"}
+                            </span>
+                            <span className="text-[11px] text-slate-500 shrink-0">
+                              {summarizeMockTestQuestions(test.questions).mcq +
+                                summarizeMockTestQuestions(test.questions).coding}{" "}
+                              Q
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {linkTestIds.length > 1 ? (
+                    <div className="mb-3 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                      Multiple tests selected — you will choose <strong>one by one</strong> or{" "}
+                      <strong>random paper</strong> next.
+                    </div>
+                  ) : linkTestIds.length === 1 ? (
+                    <div className="mb-3 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                      Single test — generates a direct public link to that paper.
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={handleGeneratePublicLink}
+                    disabled={creatingLink || linkTestIds.length === 0}
+                    className="inline-flex items-center justify-center gap-2 w-full h-10 px-4 rounded-xl bg-[#00448a] text-white hover:bg-[#003a76] disabled:opacity-60 text-sm font-semibold shadow-sm"
+                  >
+                    <QrCode className="h-4 w-4" />
+                    {creatingLink ? "Generating…" : "Generate link & QR"}
+                  </button>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-5">
+                  <div className="flex items-center justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="font-semibold text-slate-900">Your public links</h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {publicLinksLoading ? "Loading…" : `${publicLinks.length} link(s)`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={loadPublicLinks}
+                      disabled={publicLinksLoading}
+                      className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 hover:border-[#00448a]/30 disabled:opacity-50"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+
+                  {publicLinks.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/80 py-10 px-4 text-center text-sm text-slate-500">
+                      No public links yet. Select tests on the left and generate one.
+                    </div>
+                  ) : (
+                    <ul className="space-y-4 max-h-[420px] overflow-y-auto pr-1">
+                      {publicLinks.map((link) => {
+                        const joinUrl = buildMockPublicJoinUrl(link.id, linkOrigin);
+                        const qrUrl = qrCodeImageUrl(joinUrl, 160);
+                        const titles = (link.testIds || []).map(
+                          (id, i) =>
+                            tests.find((t) => t.id === id)?.title ||
+                            link.testTitles?.[i] ||
+                            id
+                        );
+                        return (
+                          <li
+                            key={link.id}
+                            className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 sm:p-4"
+                          >
+                            <div className="flex flex-col sm:flex-row gap-4">
+                              <div className="shrink-0 flex flex-col items-center gap-1.5">
+                                <Image
+                                  src={qrUrl}
+                                  alt={`QR for ${link.label || "public link"}`}
+                                  width={160}
+                                  height={160}
+                                  unoptimized
+                                  className="rounded-lg border border-slate-200 bg-white p-1"
+                                />
+                                <a
+                                  href={qrUrl}
+                                  download={`mock-public-${link.id}.png`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[11px] font-medium text-[#00448a] hover:underline"
+                                >
+                                  Download QR
+                                </a>
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2 mb-1">
+                                  <p className="font-semibold text-slate-900">
+                                    {link.label || "Untitled link"}
+                                  </p>
+                                  <span
+                                    className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                                      link.active !== false
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : "bg-slate-100 text-slate-600"
+                                    }`}
+                                  >
+                                    {link.active !== false ? "Active" : "Inactive"}
+                                  </span>
+                                  {(link.testIds || []).length > 1 ? (
+                                    <span
+                                      className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                                        link.mode === MOCK_PUBLIC_MODE_SEQUENTIAL
+                                          ? "bg-indigo-100 text-indigo-800"
+                                          : "bg-amber-100 text-amber-800"
+                                      }`}
+                                    >
+                                      {link.mode === MOCK_PUBLIC_MODE_SEQUENTIAL
+                                        ? "One by one"
+                                        : "Random paper"}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-sky-100 text-sky-800">
+                                      Direct
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-slate-600 mb-2 line-clamp-2">
+                                  {titles.join(", ") || "—"}
+                                </p>
+                                <div className="flex flex-wrap gap-2 mb-2">
+                                  <input
+                                    readOnly
+                                    value={joinUrl}
+                                    className="flex-1 min-w-[160px] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px] font-mono bg-white"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => copyPublicLink(link.id)}
+                                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 bg-white hover:border-[#00448a]/40"
+                                  >
+                                    {copiedLinkId === link.id ? "Copied!" : "Copy"}
+                                  </button>
+                                  <a
+                                    href={joinUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-[#00448a] text-white hover:bg-[#003a76]"
+                                  >
+                                    Open
+                                  </a>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        await updateMockPublicLink(link.id, {
+                                          active: link.active === false,
+                                        });
+                                        await loadPublicLinks();
+                                      } catch (e) {
+                                        alert(e?.message || "Failed to update link.");
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white"
+                                  >
+                                    {link.active === false ? "Activate" : "Deactivate"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!confirm("Delete this public link?")) return;
+                                      try {
+                                        await deleteMockPublicLink(link.id);
+                                        await loadPublicLinks();
+                                      } catch (e) {
+                                        alert(e?.message || "Failed to delete link.");
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-red-200 text-red-700 bg-white hover:bg-red-50"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
               </div>
 
               <div className="grid gap-5 xl:grid-cols-[260px_1fr] xl:items-start">
@@ -1599,6 +2094,116 @@ export default function AdminMockTestCompanyPage() {
                                   >
                                     Add sub-section
                                   </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {(mcqSectionNames.length > 0 || codingSectionNames.length > 0) && (
+                              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 sm:p-4">
+                                <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
+                                  <div>
+                                    <p className="text-sm font-semibold text-slate-900">
+                                      Section / sub-section timings
+                                    </p>
+                                    <p className="text-xs text-slate-500 mt-0.5">
+                                      Leave blank for free navigation with the overall test time.
+                                      When set, candidates stay in that section until time ends, then move automatically.
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSectionTimings({});
+                                      setSubSectionTimings({});
+                                    }}
+                                    className="text-xs font-medium text-slate-600 hover:text-[#00448a]"
+                                  >
+                                    Clear all timings
+                                  </button>
+                                </div>
+                                <div className="space-y-3">
+                                  {Array.from(
+                                    new Set([...mcqSectionNames, ...codingSectionNames])
+                                  ).map((sec) => {
+                                    const subs = collectSubSectionsForSection(
+                                      sec,
+                                      sectionMap,
+                                      mcqDrafts
+                                    );
+                                    return (
+                                      <div
+                                        key={sec}
+                                        className="rounded-lg border border-slate-200 bg-white p-3"
+                                      >
+                                        <div className="flex flex-wrap items-center gap-3">
+                                          <p className="text-sm font-semibold text-slate-800 min-w-[120px]">
+                                            {sec}
+                                          </p>
+                                          <label className="flex items-center gap-2 text-xs text-slate-600">
+                                            <span>Minutes</span>
+                                            <input
+                                              type="number"
+                                              min={0}
+                                              value={sectionTimings[sec] ?? ""}
+                                              onChange={(e) => {
+                                                const v = e.target.value;
+                                                setSectionTimings((prev) => {
+                                                  const next = { ...prev };
+                                                  if (v === "" || Number(v) <= 0) delete next[sec];
+                                                  else next[sec] = Number(v);
+                                                  return next;
+                                                });
+                                              }}
+                                              placeholder="—"
+                                              className="w-20 border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
+                                            />
+                                          </label>
+                                          <span className="text-[11px] text-slate-400">
+                                            {subs.length
+                                              ? "Optional: set sub-section times below (overrides section time)"
+                                              : "Section time for this whole section"}
+                                          </span>
+                                        </div>
+                                        {subs.length > 0 ? (
+                                          <div className="mt-2 grid sm:grid-cols-2 gap-2 pl-0 sm:pl-2">
+                                            {subs.map((sub) => {
+                                              const key = mockSubSectionTimingKey(sec, sub);
+                                              return (
+                                                <label
+                                                  key={key}
+                                                  className="flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50 px-2.5 py-2 text-xs"
+                                                >
+                                                  <span className="text-slate-700 truncate">{sub}</span>
+                                                  <span className="flex items-center gap-1.5 shrink-0">
+                                                    <span className="text-slate-500">min</span>
+                                                    <input
+                                                      type="number"
+                                                      min={0}
+                                                      value={subSectionTimings[key] ?? ""}
+                                                      onChange={(e) => {
+                                                        const v = e.target.value;
+                                                        setSubSectionTimings((prev) => {
+                                                          const next = { ...prev };
+                                                          if (v === "" || Number(v) <= 0) {
+                                                            delete next[key];
+                                                          } else {
+                                                            next[key] = Number(v);
+                                                          }
+                                                          return next;
+                                                        });
+                                                      }}
+                                                      placeholder="—"
+                                                      className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm bg-white"
+                                                    />
+                                                  </span>
+                                                </label>
+                                              );
+                                            })}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}

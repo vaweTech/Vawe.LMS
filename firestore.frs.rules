@@ -1,0 +1,33 @@
+// =============================================================================
+// SkillWins FRS — merge these match blocks into your production firestore.rules
+// (Firebase console or your main rules file). Do NOT deploy this file alone;
+// it would deny every other collection.
+//
+// Admin SDK /api/crt-frs bypasses these rules. Browser clients must not read or
+// write biometric embeddings or challenge docs.
+// =============================================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- paste into your existing rules ---
+    match /crtFaceProfiles/{uid} {
+      allow read, write: if false;
+    }
+    match /crtFaceCheckins/{id} {
+      allow read, write: if false;
+    }
+    match /crtFaceProfileResets/{id} {
+      allow read, write: if false;
+    }
+    match /crtFrsChallenges/{id} {
+      allow read, write: if false;
+    }
+    match /crtFrsRateLimits/{uid} {
+      allow read, write: if false;
+    }
+    // --- end FRS block ---
+
+  }
+}
