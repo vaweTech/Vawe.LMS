@@ -375,7 +375,14 @@ export default function MockTestPublicJoinPage() {
               <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
                 <li>No LMS login is required — complete this form to start.</li>
                 <li>Do not switch tabs; repeated switches may block the attempt.</li>
-                <li>Submit before time ends. Answers cannot be changed after submit.</li>
+                <li>
+                  Coding questions appear last as sub-sections (e.g. Coding Easy / Coding Hard).
+                </li>
+                <li>
+                  Submit unlocks only in the last 5 minutes. The test auto-submits when the final
+                  section time ends.
+                </li>
+                <li>Answers cannot be changed after submit.</li>
                 {mode === MOCK_PUBLIC_MODE_SEQUENTIAL && testCount > 1 ? (
                   <li>You will take {testCount} tests one by one in the set order.</li>
                 ) : null}

@@ -13,15 +13,18 @@ import {
   fetchMockTest,
   fetchMockTestAccountBlock,
   fetchMockTestGroup,
+  formatMockSubSectionLabel,
   getMockQuestionSubSection,
+  getMockRemainingSectionBasedMs,
   getMockScopeTiming,
-  getMockSubSectionsForSection,
   hasMockSectionBasedTiming,
   isMockAnswerCorrect,
   isMockTestAccountBlocked,
   isMockTestLocked,
   MOCK_JUDGE_LANGUAGES,
   normalizeMockQuestionOptions,
+  orderMockSectionsForExam,
+  orderMockSubSectionsForExam,
   saveMockTestSubmission,
   summarizeMockTestQuestions,
   transformMockCompilerInput,
@@ -240,7 +243,6 @@ function TakeMockTestPage() {
   const [loading, setLoading] = useState(true);
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState(false);
-  const [part, setPart] = useState("mcq");
   const [activeSection, setActiveSection] = useState("General");
   const [activeSubSection, setActiveSubSection] = useState("General");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -252,7 +254,7 @@ function TakeMockTestPage() {
   const [scoreDetail, setScoreDetail] = useState(null);
   const [lockedAccount, setLockedAccount] = useState(null);
   const [scopeTimeLeftMs, setScopeTimeLeftMs] = useState(null);
-  const [stayOnPageNotice, setStayOnPageNotice] = useState("");
+  const [pageNotice, setPageNotice] = useState(null);
   const [startCountdown, setStartCountdown] = useState(null);
   const [examEnterVisible, setExamEnterVisible] = useState(false);
   const [startingExam, setStartingExam] = useState(false);
@@ -368,23 +370,32 @@ function TakeMockTestPage() {
   const { markSubmitted, setOnTimeUp, suppressViolations } = secure;
 
   const showStayOnPageNotice = useCallback(
-    (detail = "") => {
+    (detail = "", { mode = "stay" } = {}) => {
       suppressViolations(8000);
-      setStayOnPageNotice(
-        detail
+      if (mode === "section") {
+        setPageNotice({
+          mode: "section",
+          message:
+            detail || "You cannot move to another section until the time is out.",
+        });
+        return;
+      }
+      setPageNotice({
+        mode: "stay",
+        message: detail
           ? `Don't exit the page. ${detail}`
-          : "Don't exit the page. Stay on this screen until the timer ends."
-      );
+          : "Don't exit the page. Stay on this screen until the timer ends.",
+      });
     },
     [suppressViolations]
   );
 
   useEffect(() => {
-    if (!stayOnPageNotice) return undefined;
+    if (!pageNotice) return undefined;
     suppressViolations(8000);
     const id = setInterval(() => suppressViolations(8000), 3000);
     return () => clearInterval(id);
-  }, [stayOnPageNotice, suppressViolations]);
+  }, [pageNotice, suppressViolations]);
 
   useEffect(() => {
     return () => {
@@ -474,26 +485,20 @@ function TakeMockTestPage() {
 
   const summary = useMemo(() => summarizeMockTestQuestions(questions), [questions]);
 
-  const partQuestions = useMemo(() => {
-    return questions
-      .map((q, index) => ({ q, index }))
-      .filter(({ q }) =>
-        part === "mcq" ? (q?.type || "mcq") === "mcq" : q?.type === "coding"
-      );
-  }, [questions, part]);
+  const allQuestionEntries = useMemo(
+    () => questions.map((q, index) => ({ q, index })),
+    [questions]
+  );
 
-  const sectionsInPart = useMemo(() => {
-    const set = new Set();
-    partQuestions.forEach(({ q }) => {
-      set.add(String(q?.section || "").trim() || "General");
-    });
-    return Array.from(set);
-  }, [partQuestions]);
+  const allSections = useMemo(
+    () => orderMockSectionsForExam(questions),
+    [questions]
+  );
 
-  const subSectionsInSection = useMemo(() => {
-    if (part === "coding") return [];
-    return getMockSubSectionsForSection(questions, "mcq", activeSection);
-  }, [questions, part, activeSection]);
+  const subSectionsInSection = useMemo(
+    () => orderMockSubSectionsForExam(questions, activeSection),
+    [questions, activeSection]
+  );
 
   const scopeTiming = useMemo(
     () =>
@@ -514,14 +519,14 @@ function TakeMockTestPage() {
   );
 
   const sectionQuestions = useMemo(() => {
-    return partQuestions.filter(({ q }) => {
+    return allQuestionEntries.filter(({ q }) => {
       const sec = String(q?.section || "").trim() || "General";
       if (sec !== activeSection) return false;
       if (!subSectionsInSection.length) return true;
       const sub = getMockQuestionSubSection(q) || "General";
       return sub === activeSubSection;
     });
-  }, [partQuestions, activeSection, activeSubSection, subSectionsInSection.length]);
+  }, [allQuestionEntries, activeSection, activeSubSection, subSectionsInSection]);
 
   const currentPos = sectionQuestions.findIndex(({ index }) => index === activeIndex);
   const currentEntry = sectionQuestions[currentPos >= 0 ? currentPos : 0];
@@ -530,20 +535,17 @@ function TakeMockTestPage() {
 
   useEffect(() => {
     if (didInitPart.current) return;
-    if (summary.mcq > 0) {
-      setPart("mcq");
-      didInitPart.current = true;
-    } else if (summary.coding > 0) {
-      setPart("coding");
+    if (allSections.length) {
+      setActiveSection(allSections[0]);
       didInitPart.current = true;
     }
-  }, [summary.mcq, summary.coding]);
+  }, [allSections]);
 
   useEffect(() => {
-    if (sectionsInPart.length && !sectionsInPart.includes(activeSection)) {
-      setActiveSection(sectionsInPart[0]);
+    if (allSections.length && !allSections.includes(activeSection)) {
+      setActiveSection(allSections[0]);
     }
-  }, [sectionsInPart, activeSection]);
+  }, [allSections, activeSection]);
 
   useEffect(() => {
     if (subSectionsInSection.length && !subSectionsInSection.includes(activeSubSection)) {
@@ -558,9 +560,9 @@ function TakeMockTestPage() {
       setActiveIndex(sectionQuestions[0].index);
       setVisited((v) => ({ ...v, [sectionQuestions[0].index]: true }));
     }
-    // Reset to first question when part / section / sub-section changes.
+    // Reset to first question when section / sub-section changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only on navigation scope change
-  }, [part, activeSection, activeSubSection]);
+  }, [activeSection, activeSubSection]);
 
   const isAnswered = useCallback(
     (idx, q) => {
@@ -884,36 +886,6 @@ function TakeMockTestPage() {
     setRunLoading((p) => ({ ...p, [currentIdx]: false }));
   }
 
-  function switchPart(nextPart, { force = false } = {}) {
-    if (
-      !force &&
-      timingEnabled &&
-      scopeTiming.mode !== "none" &&
-      scopeTimeLeftMs != null &&
-      scopeTimeLeftMs > 0 &&
-      nextPart !== part
-    ) {
-      showStayOnPageNotice("Wait until the current section time ends before moving on.");
-      return false;
-    }
-    setPart(nextPart);
-    const nextQs = questions
-      .map((q, index) => ({ q, index }))
-      .filter(({ q }) =>
-        nextPart === "mcq" ? (q?.type || "mcq") === "mcq" : q?.type === "coding"
-      );
-    if (nextQs.length) {
-      const sec = String(nextQs[0].q?.section || "").trim() || "General";
-      setActiveSection(sec);
-      const subs =
-        nextPart === "coding"
-          ? []
-          : getMockSubSectionsForSection(questions, "mcq", sec);
-      setActiveSubSection(subs[0] || "General");
-    }
-    return true;
-  }
-
   function goToNextScope({ force = false } = {}) {
     // Normal "Save & Next": move within the current section/sub-section first.
     if (!force) {
@@ -938,7 +910,10 @@ function TakeMockTestPage() {
       const subIdx = subSectionsInSection.indexOf(activeSubSection);
       if (subIdx >= 0 && subIdx < subSectionsInSection.length - 1) {
         if (timedLock && scopeTiming.mode === "subsection") {
-          showStayOnPageNotice("Wait until this sub-section time ends before moving to the next one.");
+          showStayOnPageNotice(
+            "You cannot move to another sub-section until the time is out.",
+            { mode: "section" }
+          );
           return false;
         }
         setActiveSubSection(subSectionsInSection[subIdx + 1]);
@@ -946,25 +921,21 @@ function TakeMockTestPage() {
       }
     }
 
-    const secIdx = sectionsInPart.indexOf(activeSection);
-    if (secIdx >= 0 && secIdx < sectionsInPart.length - 1) {
+    const secIdx = allSections.indexOf(activeSection);
+    if (secIdx >= 0 && secIdx < allSections.length - 1) {
       if (timedLock) {
-        showStayOnPageNotice("Wait until this section time ends before moving to the next section.");
+        showStayOnPageNotice("You cannot move to another section until the time is out.", {
+          mode: "section",
+        });
         return false;
       }
-      const nextSec = sectionsInPart[secIdx + 1];
+      const nextSec = allSections[secIdx + 1];
       setActiveSection(nextSec);
-      const subs =
-        part === "coding"
-          ? []
-          : getMockSubSectionsForSection(questions, "mcq", nextSec);
+      const subs = orderMockSubSectionsForExam(questions, nextSec);
       setActiveSubSection(subs[0] || "General");
       return true;
     }
 
-    if (part === "mcq" && summary.coding > 0) {
-      return switchPart("coding", { force });
-    }
     return false;
   }
 
@@ -972,10 +943,18 @@ function TakeMockTestPage() {
     if (advancingScopeRef.current) return;
     advancingScopeRef.current = true;
     try {
+      const onLastScope =
+        allSections.indexOf(activeSection) === allSections.length - 1 &&
+        (!subSectionsInSection.length ||
+          subSectionsInSection.indexOf(activeSubSection) ===
+            subSectionsInSection.length - 1);
+      if (onLastScope && !submitted) {
+        finalizeSubmit();
+        return;
+      }
       const moved = goToNextScope({ force: true });
       if (!moved && !submitted) {
         finalizeSubmit();
-        alert("Section time is up. Your test has been submitted.");
       }
     } finally {
       setTimeout(() => {
@@ -1012,24 +991,54 @@ function TakeMockTestPage() {
   }, [
     secure.started,
     timingEnabled,
-    part,
     scopeTiming.key,
     scopeTiming.minutes,
     scopeTiming.mode,
   ]);
 
-  const canContinueToCoding = part === "mcq" && summary.coding > 0;
   const canGoNext =
     currentPos < sectionQuestions.length - 1 ||
     (subSectionsInSection.length > 0 &&
       subSectionsInSection.indexOf(activeSubSection) <
         subSectionsInSection.length - 1) ||
-    sectionsInPart.indexOf(activeSection) < sectionsInPart.length - 1 ||
-    canContinueToCoding;
+    allSections.indexOf(activeSection) < allSections.length - 1;
+
+  const SUBMIT_UNLOCK_MS = 5 * 60 * 1000;
+
+  const remainingTestMs = useMemo(() => {
+    if (timingEnabled) {
+      return getMockRemainingSectionBasedMs({
+        questions,
+        sectionsOrdered: allSections,
+        activeSection,
+        activeSubSection,
+        sectionTimings: test?.sectionTimings,
+        subSectionTimings: test?.subSectionTimings,
+        scopeTimeLeftMs,
+      });
+    }
+    if (secure.timeLeftMs != null) return Math.max(0, Number(secure.timeLeftMs) || 0);
+    return null;
+  }, [
+    timingEnabled,
+    questions,
+    allSections,
+    activeSection,
+    activeSubSection,
+    test?.sectionTimings,
+    test?.subSectionTimings,
+    scopeTimeLeftMs,
+    secure.timeLeftMs,
+  ]);
+
+  const canSubmitByTime =
+    remainingTestMs == null || remainingTestMs <= SUBMIT_UNLOCK_MS;
 
   function handleSubmit() {
-    if (canContinueToCoding) {
-      switchPart("coding");
+    if (!canSubmitByTime) {
+      showStayOnPageNotice("Submit unlocks in the last 5 minutes of the test.", {
+        mode: "section",
+      });
       return;
     }
     if (!confirm("Submit the test? You cannot change answers after submitting.")) return;
@@ -1262,8 +1271,8 @@ function TakeMockTestPage() {
               <li>Copying question text is not allowed.</li>
               {timingEnabled ? (
                 <li>
-                  Section / sub-section timers are enabled. You cannot open the next section until
-                  the current time ends — then it moves automatically.
+                  Section / sub-section timers are enabled. You cannot move to another section until
+                  the time is out — then it moves automatically.
                 </li>
               ) : (
                 <li>
@@ -1271,8 +1280,13 @@ function TakeMockTestPage() {
                 </li>
               )}
               <li>
-                The final <strong>Submit Test</strong> button is available from the question palette
-                area. Review answers before submitting.
+                Coding questions appear in the last section(s) as sub-sections labeled{" "}
+                <strong>Coding Easy</strong> / <strong>Coding Hard</strong> (as configured).
+              </li>
+              <li>
+                <strong>Submit Test</strong> stays disabled until the last{" "}
+                <strong>5 minutes</strong> of the test. When the final section / sub-section time
+                ends, the test is submitted automatically.
               </li>
               <li>
                 After submission you cannot change answers. Make sure you have attempted all
@@ -1445,26 +1459,38 @@ function TakeMockTestPage() {
         requestFullscreen={secure.requestFullscreen}
       />
 
-      {stayOnPageNotice ? (
+      {pageNotice ? (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/55">
           <div
             role="dialog"
             aria-modal="true"
-            aria-labelledby="stay-on-page-title"
-            className="w-full max-w-md rounded-2xl border border-amber-200 bg-white shadow-2xl p-6 text-center"
+            aria-labelledby="page-notice-title"
+            className={`w-full max-w-md rounded-2xl border bg-white shadow-2xl p-6 text-center ${
+              pageNotice.mode === "section"
+                ? "border-slate-200"
+                : "border-amber-200"
+            }`}
           >
-            <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">
-              Stay on this page
-            </p>
-            <h2 id="stay-on-page-title" className="text-xl font-bold text-slate-900 mb-2">
-              Don&apos;t exit the page
-            </h2>
-            <p className="text-sm text-slate-600 mb-5">{stayOnPageNotice}</p>
+            {pageNotice.mode === "section" ? (
+              <h2 id="page-notice-title" className="text-xl font-bold text-slate-900 mb-2">
+                Section locked
+              </h2>
+            ) : (
+              <>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">
+                  Stay on this page
+                </p>
+                <h2 id="page-notice-title" className="text-xl font-bold text-slate-900 mb-2">
+                  Don&apos;t exit the page
+                </h2>
+              </>
+            )}
+            <p className="text-sm text-slate-600 mb-5">{pageNotice.message}</p>
             <button
               type="button"
               onClick={() => {
                 suppressViolations(1500);
-                setStayOnPageNotice("");
+                setPageNotice(null);
               }}
               className="px-5 py-2.5 rounded-lg bg-[#00448a] text-white text-sm font-semibold hover:bg-[#003a76]"
             >
@@ -1506,104 +1532,77 @@ function TakeMockTestPage() {
             ) : null}
           </div>
 
-          {/* Part tabs */}
-          <div className="flex border-t border-white/20">
-            {summary.mcq > 0 && (
-              <button
-                type="button"
-                onClick={() => switchPart("mcq")}
-                className={`flex-1 py-2 xl:py-2.5 text-xs xl:text-sm font-medium transition ${
-                  part === "mcq" ? "bg-white text-[#00448a]" : "text-white/90 hover:bg-white/10"
-                }`}
-              >
-                MCQ ({summary.mcq})
-              </button>
-            )}
-            {summary.coding > 0 && (
-              <button
-                type="button"
-                onClick={() => switchPart("coding")}
-                className={`flex-1 py-2 xl:py-2.5 text-xs xl:text-sm font-medium transition ${
-                  part === "coding" ? "bg-white text-[#00448a]" : "text-white/90 hover:bg-white/10"
-                }`}
-              >
-                Coding ({summary.coding})
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Section tabs */}
-        {sectionsInPart.length > 0 && (
-          <div className="bg-white border-b shrink-0 px-3 xl:px-4 py-1.5 xl:py-2">
-            <p className="text-[10px] xl:text-xs font-semibold text-gray-500 uppercase mb-1">Sections</p>
-            <div className="flex flex-wrap gap-1.5 xl:gap-2">
-              {sectionsInPart.map((sec) => (
+          {/* Section tabs (top nav) */}
+          {allSections.length > 0 && (
+            <div className="flex border-t border-white/20 overflow-x-auto">
+              {allSections.map((sec) => (
                 <button
                   key={sec}
                   type="button"
                   onClick={() => {
                     if (timingEnabled && sec !== activeSection) {
                       showStayOnPageNotice(
-                        "Wait until this section time ends before opening another section."
+                        "You cannot move to another section until the time is out.",
+                        { mode: "section" }
                       );
                       return;
                     }
                     setActiveSection(sec);
-                    const subs = getMockSubSectionsForSection(
-                      questions,
-                      part === "coding" ? "coding" : "mcq",
-                      sec
-                    );
+                    const subs = orderMockSubSectionsForExam(questions, sec);
                     setActiveSubSection(subs[0] || "General");
                   }}
-                  className={`px-2.5 xl:px-4 py-1 xl:py-1.5 rounded text-[11px] xl:text-sm font-medium border transition ${
+                  className={`flex-1 min-w-[7rem] py-2 xl:py-2.5 px-3 text-xs xl:text-sm font-medium transition whitespace-nowrap ${
                     activeSection === sec
-                      ? "bg-[#00448a] text-white border-[#00448a]"
+                      ? "bg-white text-[#00448a]"
                       : timingEnabled
-                        ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
-                        : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
+                        ? "text-white/50 cursor-not-allowed"
+                        : "text-white/90 hover:bg-white/10"
                   }`}
                 >
                   {sec}
                 </button>
               ))}
             </div>
-            {subSectionsInSection.length > 0 && (
-              <div className="mt-1.5 xl:mt-2 pt-1.5 xl:pt-2 border-t border-dashed border-gray-200">
-                <p className="text-[10px] xl:text-xs font-semibold text-gray-500 uppercase mb-1 xl:mb-1.5">Sub-sections</p>
-                <div className="flex flex-wrap gap-1.5 xl:gap-2">
-                  {subSectionsInSection.map((sub) => (
-                    <button
-                      key={sub}
-                      type="button"
-                      onClick={() => {
-                        if (
-                          timingEnabled &&
-                          scopeTiming.mode === "subsection" &&
-                          sub !== activeSubSection
-                        ) {
-                          showStayOnPageNotice(
-                            "Wait until this sub-section time ends before opening another."
-                          );
-                          return;
-                        }
-                        setActiveSubSection(sub);
-                      }}
-                      className={`px-2.5 xl:px-3 py-1 xl:py-1.5 rounded text-[11px] xl:text-xs font-medium border transition ${
-                        activeSubSection === sub
-                          ? "bg-[#26ebe5] text-[#00448a] border-[#26ebe5]"
-                          : timingEnabled && scopeTiming.mode === "subsection"
-                            ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
-                            : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
-                      }`}
-                    >
-                      {sub}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+          )}
+        </div>
+
+        {/* Sub-section tabs */}
+        {subSectionsInSection.length > 0 && (
+          <div className="bg-white border-b shrink-0 px-3 xl:px-4 py-1.5 xl:py-2">
+            <p className="text-[10px] xl:text-xs font-semibold text-gray-500 uppercase mb-1 xl:mb-1.5">
+              Sub-sections
+            </p>
+            <div className="flex flex-wrap gap-1.5 xl:gap-2">
+              {subSectionsInSection.map((sub) => (
+                <button
+                  key={sub}
+                  type="button"
+                  onClick={() => {
+                    if (
+                      timingEnabled &&
+                      scopeTiming.mode === "subsection" &&
+                      sub !== activeSubSection
+                    ) {
+                      showStayOnPageNotice(
+                        "You cannot move to another sub-section until the time is out.",
+                        { mode: "section" }
+                      );
+                      return;
+                    }
+                    setActiveSubSection(sub);
+                  }}
+                  className={`px-2.5 xl:px-3 py-1 xl:py-1.5 rounded text-[11px] xl:text-xs font-medium border transition ${
+                    activeSubSection === sub
+                      ? "bg-[#26ebe5] text-[#00448a] border-[#26ebe5]"
+                      : timingEnabled && scopeTiming.mode === "subsection"
+                        ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
+                        : "bg-gray-50 text-gray-700 border-gray-200 hover:border-[#00448a]/40"
+                  }`}
+                >
+                  {formatMockSubSectionLabel(questions, activeSection, sub)}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -1635,7 +1634,9 @@ function TakeMockTestPage() {
                     </div>
                     <span className="text-[10px] xl:text-xs px-2 py-0.5 xl:py-1 rounded bg-[#26ebe5]/20 text-[#00448a] font-medium">
                       {activeSection}
-                      {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""}
+                      {subSectionsInSection.length > 0
+                        ? ` › ${formatMockSubSectionLabel(questions, activeSection, activeSubSection)}`
+                        : ""}
                     </span>
                   </div>
 
@@ -1806,9 +1807,7 @@ function TakeMockTestPage() {
                       disabled={!canGoNext}
                       className="px-3 xl:px-5 py-1 xl:py-2 rounded bg-[#00448a] hover:bg-[#003a76] text-white text-[11px] xl:text-sm font-medium disabled:opacity-40"
                     >
-                      {currentPos >= sectionQuestions.length - 1 && canContinueToCoding
-                        ? "Go to Coding"
-                        : "Save & Next"}
+                      Save &amp; Next
                     </button>
                   </div>
                 </div>
@@ -1824,8 +1823,9 @@ function TakeMockTestPage() {
               <p className="text-[10px] xl:text-xs text-gray-500 uppercase font-semibold">Question Palette</p>
               <p className="text-xs xl:text-sm font-medium text-[#00448a] mt-0.5 xl:mt-1">
                 {activeSection}
-                {subSectionsInSection.length > 0 ? ` › ${activeSubSection}` : ""} ·{" "}
-                {part === "mcq" ? "MCQ" : "Coding"}
+                {subSectionsInSection.length > 0
+                  ? ` › ${formatMockSubSectionLabel(questions, activeSection, activeSubSection)}`
+                  : ""}
               </p>
             </div>
 
@@ -1878,14 +1878,19 @@ function TakeMockTestPage() {
               <button
                 type="button"
                 onClick={handleSubmit}
-                className={`w-full py-2 xl:py-2.5 rounded-lg text-white font-semibold text-xs xl:text-sm ${
-                  canContinueToCoding
-                    ? "bg-[#00448a] hover:bg-[#003a76]"
-                    : "bg-green-600 hover:bg-green-700"
-                }`}
+                disabled={!canSubmitByTime}
+                className="w-full py-2 xl:py-2.5 rounded-lg text-white font-semibold text-xs xl:text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600"
               >
-                {canContinueToCoding ? "Go to Coding" : "Submit Test"}
+                Submit Test
               </button>
+              {!canSubmitByTime ? (
+                <p className="text-[10px] text-center text-amber-700">
+                  Submit unlocks in the last 5 minutes
+                  {remainingTestMs != null
+                    ? ` (${formatExamTime(Math.max(0, remainingTestMs - SUBMIT_UNLOCK_MS))} left until unlock)`
+                    : ""}
+                </p>
+              ) : null}
               {!allAnswered && (
                 <p className="text-[10px] text-center text-gray-500">
                   Some questions are unanswered
@@ -1915,11 +1920,10 @@ function TakeMockTestPage() {
             <button
               type="button"
               onClick={handleSubmit}
-              className={`h-9 px-4 shrink-0 rounded text-white text-xs font-semibold ${
-                canContinueToCoding ? "bg-[#00448a]" : "bg-green-600"
-              }`}
+              disabled={!canSubmitByTime}
+              className="h-9 px-4 shrink-0 rounded text-white text-xs font-semibold bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {canContinueToCoding ? "Coding" : "Submit"}
+              Submit
             </button>
           </div>
         </div>

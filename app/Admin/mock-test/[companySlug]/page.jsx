@@ -25,7 +25,9 @@ import {
   normalizeMockSectionTimings,
   normalizeMockSubSectionTimings,
   sanitizeMockQuestions,
+  sumMockSubSectionTimingsForSection,
   summarizeMockTestQuestions,
+  syncSectionTimingsFromSubSections,
   unblockMockTestAccount,
   updateMockTest,
   updateMockTestGroup,
@@ -444,10 +446,22 @@ export default function AdminMockTestCompanyPage() {
     return Array.from(names).sort((a, b) => a.localeCompare(b));
   }, [sectionMap, codingDrafts]);
 
-  const mcqSubSectionNames = useMemo(() => {
-    if (activeMcqScope === SCOPE_ALL || activeMcqScope === SCOPE_UNASSIGNED) return [];
-    return collectSubSectionsForSection(activeMcqScope, sectionMap, mcqDrafts);
-  }, [activeMcqScope, sectionMap, mcqDrafts]);
+  const allSectionNames = useMemo(
+    () => Array.from(new Set([...mcqSectionNames, ...codingSectionNames])).sort((a, b) => a.localeCompare(b)),
+    [mcqSectionNames, codingSectionNames]
+  );
+
+  const activeSectionScope = activeMcqScope;
+
+  const setActiveSectionScope = useCallback((scope) => {
+    setActiveMcqScope(scope);
+    setActiveCodingScope(scope);
+  }, []);
+
+  const sectionSubSectionNames = useMemo(() => {
+    if (activeSectionScope === SCOPE_ALL || activeSectionScope === SCOPE_UNASSIGNED) return [];
+    return collectSubSectionsForSection(activeSectionScope, sectionMap, questionDrafts);
+  }, [activeSectionScope, sectionMap, questionDrafts]);
 
   const hasMcqUnassignedSection = useMemo(
     () => hasUnassignedSections(mcqDrafts),
@@ -457,42 +471,37 @@ export default function AdminMockTestCompanyPage() {
     () => hasUnassignedSections(codingDrafts),
     [codingDrafts]
   );
-  const hasMcqUnassignedSubSection = useMemo(
-    () => hasUnassignedSubSections(mcqDrafts, activeMcqScope),
-    [mcqDrafts, activeMcqScope]
+  const hasUnassignedSection = hasMcqUnassignedSection || hasCodingUnassignedSection;
+  const hasUnassignedSubSection = useMemo(
+    () => hasUnassignedSubSections(questionDrafts, activeSectionScope),
+    [questionDrafts, activeSectionScope]
   );
 
   const visibleMcqs = useMemo(
-    () => filterDraftsByScope(mcqDrafts, activeMcqScope, activeMcqSubScope),
-    [mcqDrafts, activeMcqScope, activeMcqSubScope]
+    () => filterDraftsByScope(mcqDrafts, activeSectionScope, activeMcqSubScope),
+    [mcqDrafts, activeSectionScope, activeMcqSubScope]
   );
 
   const visibleCoding = useMemo(
-    () => filterDraftsByScope(codingDrafts, activeCodingScope, SCOPE_ALL),
-    [codingDrafts, activeCodingScope]
+    () => filterDraftsByScope(codingDrafts, activeSectionScope, activeMcqSubScope),
+    [codingDrafts, activeSectionScope, activeMcqSubScope]
   );
 
   useEffect(() => {
     setActiveMcqSubScope(SCOPE_ALL);
-  }, [activeMcqScope]);
+  }, [activeSectionScope]);
 
   useEffect(() => {
-    if (!hasMcqUnassignedSection && activeMcqScope === SCOPE_UNASSIGNED) {
-      setActiveMcqScope(SCOPE_ALL);
+    if (!hasUnassignedSection && activeSectionScope === SCOPE_UNASSIGNED) {
+      setActiveSectionScope(SCOPE_ALL);
     }
-  }, [hasMcqUnassignedSection, activeMcqScope]);
+  }, [hasUnassignedSection, activeSectionScope, setActiveSectionScope]);
 
   useEffect(() => {
-    if (!hasCodingUnassignedSection && activeCodingScope === SCOPE_UNASSIGNED) {
-      setActiveCodingScope(SCOPE_ALL);
-    }
-  }, [hasCodingUnassignedSection, activeCodingScope]);
-
-  useEffect(() => {
-    if (!hasMcqUnassignedSubSection && activeMcqSubScope === SCOPE_UNASSIGNED) {
+    if (!hasUnassignedSubSection && activeMcqSubScope === SCOPE_UNASSIGNED) {
       setActiveMcqSubScope(SCOPE_ALL);
     }
-  }, [hasMcqUnassignedSubSection, activeMcqSubScope]);
+  }, [hasUnassignedSubSection, activeMcqSubScope]);
 
   const pageStats = useMemo(() => {
     let mcq = 0;
@@ -805,7 +814,7 @@ export default function AdminMockTestCompanyPage() {
                   ...createEmptyMockCodingQuestion(),
                   ...q,
                   section: String(q?.section || "").trim(),
-                  subSection: "",
+                  subSection: getMockQuestionSubSection(q),
                   companyNames: normalizeMockCompanyNames(q?.companyNames ?? q?.companyName),
                   testCases: Array.isArray(q.testCases) && q.testCases.length
                     ? q.testCases.map((tc) => ({
@@ -831,9 +840,17 @@ export default function AdminMockTestCompanyPage() {
           })
         : [ensureDraftId(createEmptyMockQuestion(), 0)];
       setQuestionDrafts(loaded);
-      setSectionMap(buildMockSectionMap(loaded));
-      setSectionTimings(normalizeMockSectionTimings(test?.sectionTimings));
-      setSubSectionTimings(normalizeMockSubSectionTimings(test?.subSectionTimings));
+      const map = buildMockSectionMap(loaded);
+      setSectionMap(map);
+      const loadedSubs = normalizeMockSubSectionTimings(test?.subSectionTimings);
+      const sectionToSubs = {};
+      Object.keys(map || {}).forEach((sec) => {
+        sectionToSubs[sec] = collectSubSectionsForSection(sec, map, loaded);
+      });
+      setSubSectionTimings(loadedSubs);
+      setSectionTimings(
+        syncSectionTimingsFromSubSections(test?.sectionTimings, loadedSubs, sectionToSubs)
+      );
       setUploadInfo("");
     } catch (err) {
       alert(err?.message || "Failed to load questions.");
@@ -892,12 +909,11 @@ export default function AdminMockTestCompanyPage() {
   }
 
   function addQuestion(type) {
-    const activeScope = type === "coding" ? activeCodingScope : activeMcqScope;
-    const section = scopeSection(activeScope);
-    const subSection = type === "coding" ? "" : scopeSubSection(activeMcqSubScope);
+    const section = scopeSection(activeSectionScope);
+    const subSection = scopeSubSection(activeMcqSubScope);
     const base =
       type === "coding"
-        ? createEmptyMockCodingQuestion(section)
+        ? createEmptyMockCodingQuestion(section, subSection)
         : createEmptyMockQuestion(section, subSection);
     setQuestionDrafts((prev) => [...prev, ensureDraftId(base, prev.length)]);
   }
@@ -907,15 +923,14 @@ export default function AdminMockTestCompanyPage() {
     if (!n) return;
     setSectionMap((prev) => ({ ...prev, [n]: prev[n] || [] }));
     setNewSectionName("");
-    if (questionType === "coding") setActiveCodingScope(n);
-    else setActiveMcqScope(n);
+    setActiveSectionScope(n);
   }
 
   function addSubSection() {
     const n = String(newSubSectionName || "").trim();
     const section =
-      activeMcqScope !== SCOPE_ALL && activeMcqScope !== SCOPE_UNASSIGNED
-        ? activeMcqScope
+      activeSectionScope !== SCOPE_ALL && activeSectionScope !== SCOPE_UNASSIGNED
+        ? activeSectionScope
         : String(newSubSectionParent || "").trim();
     if (!n || !section) {
       alert("Select a section first, then add a sub-section.");
@@ -927,7 +942,7 @@ export default function AdminMockTestCompanyPage() {
     }));
     setNewSubSectionName("");
     setNewSubSectionParent("");
-    setActiveMcqScope(section);
+    setActiveSectionScope(section);
     setActiveMcqSubScope(n);
   }
 
@@ -970,10 +985,20 @@ export default function AdminMockTestCompanyPage() {
     }
     setSaving(true);
     try {
+      const sectionToSubs = {};
+      Object.keys(sectionMap || {}).forEach((sec) => {
+        sectionToSubs[sec] = collectSubSectionsForSection(sec, sectionMap, cleaned);
+      });
+      const cleanedSubs = normalizeMockSubSectionTimings(subSectionTimings);
+      const cleanedSections = syncSectionTimingsFromSubSections(
+        sectionTimings,
+        cleanedSubs,
+        sectionToSubs
+      );
       await updateMockTest(companySlug, questionEditId, {
         questions: cleaned,
-        sectionTimings: normalizeMockSectionTimings(sectionTimings),
-        subSectionTimings: normalizeMockSubSectionTimings(subSectionTimings),
+        sectionTimings: cleanedSections,
+        subSectionTimings: cleanedSubs,
       });
       setQuestionEditId(null);
       setQuestionDrafts([]);
@@ -991,7 +1016,15 @@ export default function AdminMockTestCompanyPage() {
   function applyUploadedQuestions(questions, mode = "append") {
     const incoming = sanitizeMockQuestions(questions).map((q, idx) => {
       if (q.type === "coding") {
-        return ensureDraftId({ ...createEmptyMockCodingQuestion(q.section), ...q, subSection: "" }, idx);
+        return ensureDraftId(
+          {
+            ...createEmptyMockCodingQuestion(q.section, getMockQuestionSubSection(q)),
+            ...q,
+            subSection: getMockQuestionSubSection(q),
+            companyNames: normalizeMockCompanyNames(q?.companyNames),
+          },
+          idx
+        );
       }
       return ensureDraftId(
         {
@@ -2003,14 +2036,28 @@ export default function AdminMockTestCompanyPage() {
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6">
+                          <div className="mb-4">
+                            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                              Sections
+                            </p>
+                            <SectionTabs
+                              scope={activeSectionScope}
+                              setScope={setActiveSectionScope}
+                              sectionNames={allSectionNames}
+                              allLabel="All sections"
+                              showUnassigned={hasUnassignedSection}
+                            />
+                          </div>
+
                           <div className="flex flex-wrap items-center gap-3 mb-4">
                             <select
                               value={questionType}
                               onChange={(e) => setQuestionType(e.target.value)}
                               className="border border-gray-200 rounded-xl px-3 py-2.5 text-sm bg-gray-50/50 focus:bg-white focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                              title="Question type to add"
                             >
-                              <option value="mcq">MCQ</option>
-                              <option value="coding">Coding</option>
+                              <option value="mcq">Add as MCQ</option>
+                              <option value="coding">Add as Coding</option>
                             </select>
                             <button
                               type="button"
@@ -2024,7 +2071,7 @@ export default function AdminMockTestCompanyPage() {
                           <div className="mb-4 space-y-3">
                             <div>
                               <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
-                                Sections
+                                Create section
                               </p>
                               <div className="flex flex-wrap items-center gap-2">
                                 <input
@@ -2049,25 +2096,25 @@ export default function AdminMockTestCompanyPage() {
                                 </button>
                               </div>
                             </div>
-                            {questionType === "mcq" && mcqSectionNames.length > 0 && (
+                            {allSectionNames.length > 0 && (
                               <div>
                                 <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
                                   Sub-sections
-                                  {activeMcqScope !== SCOPE_ALL &&
-                                  activeMcqScope !== SCOPE_UNASSIGNED
-                                    ? ` for ${activeMcqScope}`
+                                  {activeSectionScope !== SCOPE_ALL &&
+                                  activeSectionScope !== SCOPE_UNASSIGNED
+                                    ? ` for ${activeSectionScope}`
                                     : ""}
                                 </p>
                                 <div className="flex flex-wrap items-center gap-2">
-                                  {(activeMcqScope === SCOPE_ALL ||
-                                    activeMcqScope === SCOPE_UNASSIGNED) && (
+                                  {(activeSectionScope === SCOPE_ALL ||
+                                    activeSectionScope === SCOPE_UNASSIGNED) && (
                                     <select
                                       value={newSubSectionParent}
                                       onChange={(e) => setNewSubSectionParent(e.target.value)}
                                       className="border border-gray-200 rounded-xl px-3 py-2 text-sm bg-white min-w-[140px]"
                                     >
                                       <option value="">Select section</option>
-                                      {mcqSectionNames.map((name) => (
+                                      {allSectionNames.map((name) => (
                                         <option key={name} value={name}>
                                           {name}
                                         </option>
@@ -2084,7 +2131,7 @@ export default function AdminMockTestCompanyPage() {
                                         addSubSection();
                                       }
                                     }}
-                                    placeholder="New sub-section name (e.g. Section A)"
+                                    placeholder="New sub-section name (e.g. Easy, Hard)"
                                     className="border border-gray-200 rounded-xl px-3 py-2 text-sm flex-1 min-w-[140px] bg-gray-50/50 focus:bg-white focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
                                   />
                                   <button
@@ -2107,7 +2154,7 @@ export default function AdminMockTestCompanyPage() {
                                     </p>
                                     <p className="text-xs text-slate-500 mt-0.5">
                                       Leave blank for free navigation with the overall test time.
-                                      When set, candidates stay in that section until time ends, then move automatically.
+                                      When sub-sections have times, section minutes auto-equal their total.
                                     </p>
                                   </div>
                                   <button
@@ -2128,8 +2175,17 @@ export default function AdminMockTestCompanyPage() {
                                     const subs = collectSubSectionsForSection(
                                       sec,
                                       sectionMap,
-                                      mcqDrafts
+                                      questionDrafts
                                     );
+                                    const subTotal = sumMockSubSectionTimingsForSection(
+                                      sec,
+                                      subSectionTimings,
+                                      subs
+                                    );
+                                    const sectionLockedToSubs = subs.length > 0 && subTotal > 0;
+                                    const sectionMinutes = sectionLockedToSubs
+                                      ? subTotal
+                                      : sectionTimings[sec] ?? "";
                                     return (
                                       <div
                                         key={sec}
@@ -2144,8 +2200,10 @@ export default function AdminMockTestCompanyPage() {
                                             <input
                                               type="number"
                                               min={0}
-                                              value={sectionTimings[sec] ?? ""}
+                                              value={sectionMinutes}
+                                              readOnly={sectionLockedToSubs}
                                               onChange={(e) => {
+                                                if (sectionLockedToSubs) return;
                                                 const v = e.target.value;
                                                 setSectionTimings((prev) => {
                                                   const next = { ...prev };
@@ -2155,14 +2213,23 @@ export default function AdminMockTestCompanyPage() {
                                                 });
                                               }}
                                               placeholder="—"
-                                              className="w-20 border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
+                                              className={`w-20 border border-slate-200 rounded-lg px-2 py-1.5 text-sm ${
+                                                sectionLockedToSubs
+                                                  ? "bg-slate-100 text-slate-700 cursor-default"
+                                                  : "bg-white"
+                                              }`}
+                                              title={
+                                                sectionLockedToSubs
+                                                  ? "Equals total of sub-section times"
+                                                  : "Section time in minutes"
+                                              }
                                             />
                                           </label>
-                                          <span className="text-[11px] text-slate-400">
-                                            {subs.length
-                                              ? "Optional: set sub-section times below (overrides section time)"
-                                              : "Section time for this whole section"}
-                                          </span>
+                                          {!subs.length ? (
+                                            <span className="text-[11px] text-slate-400">
+                                              Section time for this whole section
+                                            </span>
+                                          ) : null}
                                         </div>
                                         {subs.length > 0 ? (
                                           <div className="mt-2 grid sm:grid-cols-2 gap-2 pl-0 sm:pl-2">
@@ -2189,6 +2256,18 @@ export default function AdminMockTestCompanyPage() {
                                                           } else {
                                                             next[key] = Number(v);
                                                           }
+                                                          const sum =
+                                                            sumMockSubSectionTimingsForSection(
+                                                              sec,
+                                                              next,
+                                                              subs
+                                                            );
+                                                          setSectionTimings((prevSec) => {
+                                                            const secNext = { ...prevSec };
+                                                            if (sum > 0) secNext[sec] = sum;
+                                                            else delete secNext[sec];
+                                                            return secNext;
+                                                          });
                                                           return next;
                                                         });
                                                       }}
@@ -2209,29 +2288,27 @@ export default function AdminMockTestCompanyPage() {
                             )}
                           </div>
 
-                          {questionType === "mcq" && (
-                            <div className="mb-8">
-                              <SectionTabs
-                                scope={activeMcqScope}
-                                setScope={setActiveMcqScope}
-                                sectionNames={mcqSectionNames}
-                                allLabel="All MCQs"
-                                showUnassigned={hasMcqUnassignedSection}
+                          {(sectionSubSectionNames.length > 0 ||
+                            hasUnassignedSubSection ||
+                            (activeSectionScope !== SCOPE_ALL &&
+                              activeSectionScope !== SCOPE_UNASSIGNED)) && (
+                            <div className="mb-4">
+                              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">
+                                Sub-sections (MCQ &amp; Coding)
+                              </p>
+                              <SubSectionTabs
+                                scope={activeMcqSubScope}
+                                setScope={setActiveMcqSubScope}
+                                subSectionNames={sectionSubSectionNames}
+                                showUnassigned={hasUnassignedSubSection}
                               />
-                              {(mcqSubSectionNames.length > 0 ||
-                                hasMcqUnassignedSubSection ||
-                                (activeMcqScope !== SCOPE_ALL &&
-                                  activeMcqScope !== SCOPE_UNASSIGNED)) && (
-                                <SubSectionTabs
-                                  scope={activeMcqSubScope}
-                                  setScope={setActiveMcqSubScope}
-                                  subSectionNames={mcqSubSectionNames}
-                                  showUnassigned={hasMcqUnassignedSubSection}
-                                />
-                              )}
-                              <div className="flex items-center justify-between mb-3 mt-4">
+                            </div>
+                          )}
+
+                          <div className="mb-8">
+                              <div className="flex items-center justify-between mb-3 mt-2">
                                 <h3 className="text-base font-semibold text-gray-900">
-                                  {scopeTitle("MCQ Questions", activeMcqScope, activeMcqSubScope)}
+                                  {scopeTitle("MCQ Questions", activeSectionScope, activeMcqSubScope)}
                                 </h3>
                                 <span className="text-xs text-gray-600">{visibleMcqs.length} item(s)</span>
                               </div>
@@ -2258,7 +2335,7 @@ export default function AdminMockTestCompanyPage() {
                                           title="Section"
                                         >
                                           <option value="">Unassigned</option>
-                                          {mcqSectionNames.map((name) => (
+                                          {allSectionNames.map((name) => (
                                             <option key={name} value={name}>
                                               {name}
                                             </option>
@@ -2279,7 +2356,7 @@ export default function AdminMockTestCompanyPage() {
                                           {collectSubSectionsForSection(
                                             q.section,
                                             sectionMap,
-                                            mcqDrafts
+                                            questionDrafts
                                           ).map((name) => (
                                             <option key={name} value={name}>
                                               {name}
@@ -2375,20 +2452,11 @@ export default function AdminMockTestCompanyPage() {
                                 ))}
                               </div>
                             </div>
-                          )}
 
-                          {questionType === "coding" && (
-                            <div className="mb-8">
-                              <SectionTabs
-                                scope={activeCodingScope}
-                                setScope={setActiveCodingScope}
-                                sectionNames={codingSectionNames}
-                                allLabel="All Coding"
-                                showUnassigned={hasCodingUnassignedSection}
-                              />
-                              <div className="flex items-center justify-between mb-3 mt-4">
+                          <div className="mb-8">
+                              <div className="flex items-center justify-between mb-3 mt-2">
                                 <h3 className="text-base font-semibold text-gray-900">
-                                  {scopeTitle("Coding Questions", activeCodingScope, SCOPE_ALL)}
+                                  {scopeTitle("Coding Questions", activeSectionScope, activeMcqSubScope)}
                                 </h3>
                                 <span className="text-xs text-gray-600">{visibleCoding.length} item(s)</span>
                               </div>
@@ -2401,6 +2469,9 @@ export default function AdminMockTestCompanyPage() {
                                     <div className="flex items-center justify-between mb-3">
                                       <span className="text-sm font-medium text-gray-700">
                                         {idx + 1}. Coding
+                                        {getMockQuestionSubSection(q)
+                                          ? ` · ${getMockQuestionSubSection(q)}`
+                                          : ""}
                                       </span>
                                       <div className="flex items-center gap-2 flex-wrap justify-end">
                                         <select
@@ -2415,7 +2486,29 @@ export default function AdminMockTestCompanyPage() {
                                           title="Section"
                                         >
                                           <option value="">Unassigned</option>
-                                          {codingSectionNames.map((name) => (
+                                          {allSectionNames.map((name) => (
+                                            <option key={name} value={name}>
+                                              {name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        <select
+                                          value={getMockQuestionSubSection(q)}
+                                          onChange={(e) =>
+                                            updateQuestionDraftById(q.draftId, {
+                                              subSection: e.target.value,
+                                            })
+                                          }
+                                          className="text-xs border rounded px-2 py-1 bg-white"
+                                          title="Sub-section (e.g. Easy, Hard)"
+                                          disabled={!String(q.section || "").trim()}
+                                        >
+                                          <option value="">Unassigned</option>
+                                          {collectSubSectionsForSection(
+                                            q.section,
+                                            sectionMap,
+                                            questionDrafts
+                                          ).map((name) => (
                                             <option key={name} value={name}>
                                               {name}
                                             </option>
@@ -2526,16 +2619,10 @@ export default function AdminMockTestCompanyPage() {
                                 ))}
                               </div>
                             </div>
-                          )}
 
-                          {questionType === "mcq" && visibleMcqs.length === 0 && (
+                          {visibleMcqs.length === 0 && visibleCoding.length === 0 && (
                             <p className="text-sm text-gray-500 py-6 text-center">
-                              No MCQ questions in this section yet. Click Add question.
-                            </p>
-                          )}
-                          {questionType === "coding" && visibleCoding.length === 0 && (
-                            <p className="text-sm text-gray-500 py-6 text-center">
-                              No coding questions in this section yet. Click Add question.
+                              No questions in this section yet. Choose a type and click Add question.
                             </p>
                           )}
               </div>
