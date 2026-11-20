@@ -13,6 +13,7 @@ import {
   buildMockTestScorecardPdfBuffer,
   getMockTestScorecardFileName,
 } from "@/lib/mockTestScorecardPdf";
+import { buildMockResultWhatsAppParams } from "@/lib/mockTestResultWhatsApp";
 
 const DEFAULT_CONCURRENCY = Number(process.env.WHATSAPP_BULK_CONCURRENCY || 20);
 
@@ -117,11 +118,16 @@ export async function POST(req) {
           }
         }
 
+        // Rebuild body params on the server so exam_report matches Meta's placeholder count.
+        const resolvedBodyParams = scorecardRow
+          ? buildMockResultWhatsAppParams(scorecardRow)
+          : bodyParams;
+
         const result = await sendWhatsAppTemplate({
           phone,
           template,
           language: languageUsed,
-          bodyParams,
+          bodyParams: resolvedBodyParams,
           namedBodyParams,
           buttonParams,
           copyCodeButton,

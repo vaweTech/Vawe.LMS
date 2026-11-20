@@ -2802,6 +2802,11 @@ export default function AdminMockTestCompanyPage() {
                                             placeholder="Expected output"
                                             className="border rounded-lg px-2 py-1 text-xs font-mono"
                                           />
+                                          <p className="sm:col-span-2 text-[11px] text-slate-500">
+                                            {tcIdx < 2
+                                              ? "Public sample (shown on exam with input & expected output)"
+                                              : "Hidden automatically (used for scoring; not shown on exam)"}
+                                          </p>
                                         </div>
                                       ))}
                                       <button

@@ -10,6 +10,7 @@ import {
   buildMockTestScorecardPdfBuffer,
   getMockTestScorecardFileName,
 } from "@/lib/mockTestScorecardPdf";
+import { buildMockResultWhatsAppParams } from "@/lib/mockTestResultWhatsApp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,11 +70,15 @@ export async function POST(req) {
       headerDocument = { id: uploaded.mediaId, filename };
     }
 
+    const resolvedBodyParams = scorecardRow
+      ? buildMockResultWhatsAppParams(scorecardRow)
+      : bodyParams;
+
     const result = await sendWhatsAppTemplate({
       phone,
       template,
       language: languageUsed,
-      bodyParams,
+      bodyParams: resolvedBodyParams,
       namedBodyParams,
       buttonParams,
       copyCodeButton,

@@ -71,7 +71,9 @@ function SecureExamOverlays({
   showTabWarning,
   dismissTabWarning,
   requestFullscreen,
+  paused = false,
 }) {
+  if (paused) return null;
   return (
     <>
       {started && !isAppleMobileDevice() && !inFullscreen && !isBlocked && (
@@ -176,12 +178,19 @@ function isCompileFailure(data, errorText) {
   return Boolean(compileOutput) || /compil/i.test(status) || /compil/i.test(errorText || "");
 }
 
-/** Visible sample cases only (max 2). Hidden cases stay for scoring, not for Run Code UI. */
+/**
+ * First 2 cases are always public (sample). Remaining cases are always hidden.
+ * No admin flag needed.
+ */
 function getMockSampleTestCases(testCases, limit = 2) {
   const cases = Array.isArray(testCases) ? testCases : [];
-  const visible = cases.filter((tc) => !tc?.hidden);
-  const pool = visible.length ? visible : cases;
-  return pool.slice(0, Math.max(0, limit));
+  return cases.slice(0, Math.max(0, limit));
+}
+
+/** Remaining cases after the first 2 — placeholders only (no input/output). */
+function getMockHiddenTestCasePlaceholders(testCases, publicLimit = 2) {
+  const cases = Array.isArray(testCases) ? testCases : [];
+  return cases.slice(Math.max(0, publicLimit));
 }
 
 async function runCodingTestCases(code, language, testCases) {
@@ -442,35 +451,56 @@ function TakeMockTestPage() {
     },
   });
   useNoCopy({ enabled: secure.started && !submitted, allowEditable: true });
-  const { markSubmitted, setOnTimeUp, suppressViolations } = secure;
+  const {
+    markSubmitted,
+    setOnTimeUp,
+    suppressViolations,
+    clearTabWarningOverlay,
+  } = secure;
 
   const showStayOnPageNotice = useCallback(
-    (detail = "", { mode = "stay" } = {}) => {
-      suppressViolations(8000);
+    (detail = "", { mode = "stay", title = "" } = {}) => {
+      // Keep the exam session stable while any in-page modal is open.
+      suppressViolations(60000);
+      clearTabWarningOverlay();
       if (mode === "section") {
         setPageNotice({
           mode: "section",
+          title: title || "Section locked",
           message:
             detail || "You cannot move to another section until the time is out.",
         });
         return;
       }
+      if (mode === "info") {
+        setPageNotice({
+          mode: "info",
+          title: title || "Notice",
+          message: detail || "",
+        });
+        return;
+      }
       setPageNotice({
         mode: "stay",
+        title: title || "Don't exit the page",
         message: detail
           ? `Don't exit the page. ${detail}`
           : "Don't exit the page. Stay on this screen until the timer ends.",
       });
     },
-    [suppressViolations]
+    [suppressViolations, clearTabWarningOverlay]
   );
 
   useEffect(() => {
     if (!pageNotice) return undefined;
-    suppressViolations(8000);
-    const id = setInterval(() => suppressViolations(8000), 3000);
+    suppressViolations(60000);
+    clearTabWarningOverlay();
+    const id = setInterval(() => {
+      suppressViolations(60000);
+      clearTabWarningOverlay();
+    }, 2000);
     return () => clearInterval(id);
-  }, [pageNotice, suppressViolations]);
+  }, [pageNotice, suppressViolations, clearTabWarningOverlay]);
 
   useEffect(() => {
     return () => {
@@ -1112,13 +1142,19 @@ function TakeMockTestPage() {
     const q = questions[currentIdx];
     const code = answers[currentIdx] || "";
     if (!String(code).trim()) {
-      alert("Write your solution before running.");
+      showStayOnPageNotice("Write your solution in the code box before running.", {
+        mode: "info",
+        title: "Code required",
+      });
       return;
     }
-    // Run only sample (non-hidden) cases — show at most 2. Hidden cases stay for final scoring.
+    // Run only the first 2 (public) cases. Remaining cases stay for final scoring.
     const sampleCases = getMockSampleTestCases(q?.testCases, 2);
     if (!sampleCases.length) {
-      alert("No sample test cases available for this question.");
+      showStayOnPageNotice("No sample test cases are available for this question.", {
+        mode: "info",
+        title: "No sample cases",
+      });
       return;
     }
     setRunLoading((p) => ({ ...p, [currentIdx]: true }));
@@ -2103,40 +2139,47 @@ function TakeMockTestPage() {
         showTabWarning={secure.showTabWarning}
         dismissTabWarning={secure.dismissTabWarning}
         requestFullscreen={secure.requestFullscreen}
+        paused={Boolean(pageNotice)}
       />
 
       {pageNotice ? (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/55">
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/55">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="page-notice-title"
             className={`w-full max-w-md rounded-2xl border bg-white shadow-2xl p-6 text-center ${
-              pageNotice.mode === "section"
-                ? "border-slate-200"
-                : "border-amber-200"
+              pageNotice.mode === "stay" ? "border-amber-200" : "border-slate-200"
             }`}
           >
-            {pageNotice.mode === "section" ? (
-              <h2 id="page-notice-title" className="text-xl font-bold text-slate-900 mb-2">
-                Section locked
-              </h2>
-            ) : (
-              <>
-                <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">
-                  Stay on this page
-                </p>
-                <h2 id="page-notice-title" className="text-xl font-bold text-slate-900 mb-2">
-                  Don&apos;t exit the page
-                </h2>
-              </>
-            )}
+            {pageNotice.mode === "stay" ? (
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 mb-2">
+                Stay on this page
+              </p>
+            ) : null}
+            <h2 id="page-notice-title" className="text-xl font-bold text-slate-900 mb-2">
+              {pageNotice.title ||
+                (pageNotice.mode === "section"
+                  ? "Section locked"
+                  : pageNotice.mode === "info"
+                    ? "Notice"
+                    : "Don't exit the page")}
+            </h2>
             <p className="text-sm text-slate-600 mb-5">{pageNotice.message}</p>
             <button
               type="button"
               onClick={() => {
-                suppressViolations(1500);
+                suppressViolations(4000);
+                clearTabWarningOverlay();
                 setPageNotice(null);
+                // Stay in the exam; restore fullscreen if the browser dropped it.
+                if (
+                  !isAppleMobileDevice() &&
+                  typeof document !== "undefined" &&
+                  !document.fullscreenElement
+                ) {
+                  secure.requestFullscreen?.();
+                }
               }}
               className="px-5 py-2.5 rounded-lg bg-[#00448a] text-white text-sm font-semibold hover:bg-[#003a76]"
             >
@@ -2356,30 +2399,72 @@ function TakeMockTestPage() {
                             {currentQ.description}
                           </p>
                         ) : null}
-                        {getMockSampleTestCases(currentQ.testCases, 2).length > 0 && (
-                          <div className="rounded-lg border bg-gray-50 p-2.5 xl:p-3 text-[11px] xl:text-xs">
-                            <p className="font-semibold mb-2">Sample test cases</p>
-                            {getMockSampleTestCases(currentQ.testCases, 2).map((tc, i) => (
-                              <div key={i} className="mb-2 last:mb-0 space-y-1">
-                                <p className="text-[10px] font-medium text-gray-500">Sample {i + 1}</p>
-                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
-                                  <div>
-                                    <p className="text-[10px] text-gray-500 mb-0.5">Input</p>
-                                    <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
-                                      {tc.input || "—"}
-                                    </pre>
-                                  </div>
-                                  <div>
-                                    <p className="text-[10px] text-gray-500 mb-0.5">Expected output</p>
-                                    <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
-                                      {tc.output || "—"}
-                                    </pre>
+                        {(() => {
+                          const sampleCases = getMockSampleTestCases(currentQ.testCases, 2);
+                          const hiddenPlaceholders = getMockHiddenTestCasePlaceholders(
+                            currentQ.testCases,
+                            2
+                          );
+                          if (!sampleCases.length && !hiddenPlaceholders.length) return null;
+                          return (
+                            <div className="rounded-lg border bg-gray-50 p-2.5 xl:p-3 text-[11px] xl:text-xs space-y-3">
+                              {sampleCases.length > 0 ? (
+                                <div>
+                                  <p className="font-semibold mb-2">Sample test cases</p>
+                                  {sampleCases.map((tc, i) => (
+                                    <div key={`sample-${i}`} className="mb-2 last:mb-0 space-y-1">
+                                      <p className="text-[10px] font-medium text-gray-500">
+                                        Sample {i + 1}
+                                      </p>
+                                      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+                                        <div>
+                                          <p className="text-[10px] text-gray-500 mb-0.5">Input</p>
+                                          <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                            {tc.input || "—"}
+                                          </pre>
+                                        </div>
+                                        <div>
+                                          <p className="text-[10px] text-gray-500 mb-0.5">
+                                            Expected output
+                                          </p>
+                                          <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                            {tc.output || "—"}
+                                          </pre>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                              {hiddenPlaceholders.length > 0 ? (
+                                <div>
+                                  <p className="font-semibold mb-2">
+                                    Hidden test cases ({hiddenPlaceholders.length})
+                                  </p>
+                                  <p className="text-[10px] text-slate-500 mb-2">
+                                    Cases after the first two are hidden automatically and used for
+                                    scoring. Input and expected output are not shown.
+                                  </p>
+                                  <div className="space-y-2">
+                                    {hiddenPlaceholders.map((_, i) => (
+                                      <div
+                                        key={`hidden-${i}`}
+                                        className="rounded-lg border border-dashed border-slate-300 bg-slate-100/80 px-3 py-2"
+                                      >
+                                        <p className="text-[11px] font-semibold text-slate-700">
+                                          Hidden test case {i + 1}
+                                        </p>
+                                        <p className="mt-0.5 text-[10px] text-slate-500">
+                                          Input &amp; expected output are not shown
+                                        </p>
+                                      </div>
+                                    ))}
                                   </div>
                                 </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                              ) : null}
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div className="min-h-[240px] lg:min-h-0 flex flex-col p-2.5 xl:p-3">
                         <div className="flex flex-wrap items-center gap-2 mb-2 shrink-0">
@@ -2412,7 +2497,7 @@ function TakeMockTestPage() {
                           spellCheck={false}
                         />
                         {codingResults.length > 0 && (
-                          <div className="mt-2 shrink-0 max-h-56 overflow-y-auto space-y-2">
+                          <div className="mt-2 shrink-0 max-h-72 overflow-y-auto space-y-2">
                             <div className="text-[11px] xl:text-sm space-y-2">
                               {codingResults.map((r, i) => (
                                 <div
@@ -2443,12 +2528,12 @@ function TakeMockTestPage() {
                                           ? "Error"
                                           : "Failed"}
                                   </p>
-                                  {!r.pass && !r.skipped && !r.error ? (
+                                  {!r.skipped ? (
                                     <div className="mt-1.5 grid grid-cols-1 gap-1.5 text-[10px] xl:text-[11px]">
                                       {r.input ? (
                                         <div>
                                           <p className="font-medium text-slate-600 mb-0.5">Input</p>
-                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
+                                          <pre className="bg-white/80 border border-slate-200 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
                                             {r.input}
                                           </pre>
                                         </div>
@@ -2458,16 +2543,24 @@ function TakeMockTestPage() {
                                           <p className="font-medium text-slate-600 mb-0.5">
                                             Expected output
                                           </p>
-                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
+                                          <pre className="bg-white/80 border border-slate-200 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
                                             {r.expected || "(empty)"}
                                           </pre>
                                         </div>
                                         <div>
                                           <p className="font-medium text-slate-600 mb-0.5">
-                                            Your output
+                                            Actual output
                                           </p>
-                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-red-900">
-                                            {r.actual || "(empty)"}
+                                          <pre
+                                            className={`bg-white/80 border rounded px-2 py-1 whitespace-pre-wrap font-mono ${
+                                              r.pass
+                                                ? "border-green-200 text-green-900"
+                                                : "border-red-200 text-red-900"
+                                            }`}
+                                          >
+                                            {r.error && !r.actual
+                                              ? "(no output)"
+                                              : r.actual || "(empty)"}
                                           </pre>
                                         </div>
                                       </div>
