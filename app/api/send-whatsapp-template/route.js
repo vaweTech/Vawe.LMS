@@ -4,7 +4,12 @@ import {
   isWhatsAppConfigured,
   resolveWhatsAppTemplateLanguage,
   sendWhatsAppTemplate,
+  uploadWhatsAppDocument,
 } from "@/lib/whatsappTemplateSend";
+import {
+  buildMockTestScorecardPdfBuffer,
+  getMockTestScorecardFileName,
+} from "@/lib/mockTestScorecardPdf";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,9 +38,36 @@ export async function POST(req) {
       namedBodyParams = [],
       buttonParams = [],
       copyCodeButton,
+      scorecardRow,
+      companyLabel = "",
+      documentFilename,
+      headerDocument: incomingHeaderDocument,
     } = body || {};
 
     const languageUsed = resolveWhatsAppTemplateLanguage(template, language);
+    let headerDocument = incomingHeaderDocument || null;
+
+    if (!headerDocument && scorecardRow) {
+      const filename =
+        String(documentFilename || "").trim() || getMockTestScorecardFileName(scorecardRow);
+      const pdfBuffer = buildMockTestScorecardPdfBuffer(scorecardRow, {
+        companyLabel: companyLabel || "Mock Test",
+      });
+      const uploaded = await uploadWhatsAppDocument({
+        buffer: pdfBuffer,
+        filename,
+      });
+      if (!uploaded.ok) {
+        return NextResponse.json(
+          {
+            error: uploaded.error || "Failed to upload scorecard PDF",
+            details: uploaded.details,
+          },
+          { status: uploaded.status || 500 }
+        );
+      }
+      headerDocument = { id: uploaded.mediaId, filename };
+    }
 
     const result = await sendWhatsAppTemplate({
       phone,
@@ -45,6 +77,7 @@ export async function POST(req) {
       namedBodyParams,
       buttonParams,
       copyCodeButton,
+      headerDocument,
     });
 
     if (!result.ok) {
@@ -68,6 +101,7 @@ export async function POST(req) {
       ok: true,
       messageId: result.messageId,
       languageUsed: result.language ?? resolveWhatsAppTemplateLanguage(template, language),
+      scorecardAttached: Boolean(headerDocument),
       debug:
         process.env.NODE_ENV !== "production"
           ? { phoneE164: result.phoneE164 }

@@ -374,6 +374,11 @@ export default function MockTestPublicJoinPage() {
               <h3 className="font-semibold text-slate-900 mb-2 text-sm">Rules</h3>
               <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
                 <li>No LMS login is required — complete this form to start.</li>
+                <li>Questions are jumbled — each candidate may get a different order.</li>
+                <li>
+                  A reading passage can be shared by several questions. That same passage stays with
+                  its set.
+                </li>
                 <li>Do not switch tabs; repeated switches may block the attempt.</li>
                 <li>
                   Coding questions appear last as sub-sections (e.g. Coding Easy / Coding Hard).
@@ -383,6 +388,10 @@ export default function MockTestPublicJoinPage() {
                   section time ends.
                 </li>
                 <li>Answers cannot be changed after submit.</li>
+                <li>
+                  After you finish, your scorecard is shown on screen. Then the VAWE Institute website
+                  opens on the same page.
+                </li>
                 {mode === MOCK_PUBLIC_MODE_SEQUENTIAL && testCount > 1 ? (
                   <li>You will take {testCount} tests one by one in the set order.</li>
                 ) : null}

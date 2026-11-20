@@ -26,6 +26,7 @@ import {
   BarChart3,
   Code2,
   Download,
+  FileDown,
   MessageCircle,
   Search,
   Target,
@@ -47,8 +48,10 @@ import {
 
 import {
   MOCK_RESULT_WA_TEMPLATE,
+  buildMockExamReportScorecardPayload,
   buildMockResultWhatsAppParams,
 } from "@/lib/mockTestResultWhatsApp";
+import { downloadMockTestScorecardPdf } from "@/lib/mockTestScorecardPdf";
 
 const PASS_MARK = 40;
 
@@ -176,6 +179,28 @@ function pickContactPhone(data) {
   return String(data?.phone1 || data?.phone || data?.phone2 || data?.mobile || "").trim();
 }
 
+function looksLikeMobilePhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length === 10) return true;
+  if (digits.length === 12 && digits.startsWith("91")) return true;
+  if (digits.length === 11 && digits.startsWith("0")) return true;
+  return false;
+}
+
+/** Phone from the result itself — used when the candidate is not in Student Info. */
+function pickSubmissionPhone(row) {
+  const direct = pickContactPhone(row);
+  if (direct) return direct;
+  const uid = String(row?.userId || row?.id || "").trim();
+  if (
+    looksLikeMobilePhone(uid) &&
+    (row?.source === "public_link" || !String(row?.email || "").trim())
+  ) {
+    return uid.replace(/\D/g, "").slice(-10);
+  }
+  return "";
+}
+
 function collectRoles(data) {
   if (!data) return [];
   const roles = [];
@@ -204,12 +229,19 @@ function isStaffRole(role) {
   return false;
 }
 
-function buildRecipientInfo(studentData, userData) {
+function buildRecipientInfo(studentData, userData, submissionPhone = "") {
   const allRoles = [...collectRoles(userData), ...collectRoles(studentData)];
-  if (allRoles.some(isStaffRole)) {
+  // Only treat as staff when they actually exist in Student Info / users.
+  const knownInDirectory = Boolean(studentData || userData);
+  if (knownInDirectory && allRoles.some(isStaffRole)) {
     return { phone: "", eligible: false, skipReason: "staff" };
   }
-  const phone = pickContactPhone(studentData) || pickContactPhone(userData);
+  // Prefer Student Info / user profile; fall back to phone on the mock result
+  // so public-link / non–Student Info candidates still get WhatsApp.
+  const phone =
+    pickContactPhone(studentData) ||
+    pickContactPhone(userData) ||
+    String(submissionPhone || "").trim();
   if (!phone) {
     return { phone: "", eligible: true, skipReason: "no_phone" };
   }
@@ -221,23 +253,30 @@ async function resolveRecipientsForRows(list) {
   const out = new Map();
   if (!list.length) return out;
 
+  // Skip Firebase user lookups for public-link phones (userId is the mobile number).
+  const authUserIds = list
+    .map((row) => String(row.userId || row.id || "").trim())
+    .filter((uid) => uid && !looksLikeMobilePhone(uid));
+
   const [{ byId: studentsById, byEmail: studentsByEmail }, usersById] = await Promise.all([
     loadStudentDirectory(),
-    loadUsersByIds(list.map((row) => row.userId || row.id)),
+    loadUsersByIds(authUserIds),
   ]);
 
   for (const row of list) {
-    const key = String(row.userId || row.id || row.email || "");
+    const key = String(row.userId || row.id || row.email || row.phone || "");
     if (!key || out.has(key)) continue;
 
     const uid = String(row.userId || row.id || "").trim();
     const mail = String(row.email || "").trim().toLowerCase();
+    const submissionPhone = pickSubmissionPhone(row);
     const studentData =
-      (uid && studentsById.get(uid)) ||
+      (!looksLikeMobilePhone(uid) && uid && studentsById.get(uid)) ||
       (mail && studentsByEmail.get(mail)) ||
       null;
-    const userData = (uid && usersById.get(uid)) || null;
-    out.set(key, buildRecipientInfo(studentData, userData));
+    const userData =
+      (!looksLikeMobilePhone(uid) && uid && usersById.get(uid)) || null;
+    out.set(key, buildRecipientInfo(studentData, userData, submissionPhone));
   }
 
   return out;
@@ -259,6 +298,7 @@ function ResultsInner() {
   const [deletingKey, setDeletingKey] = useState("");
   const [waSending, setWaSending] = useState(false);
   const [waSendingRowKey, setWaSendingRowKey] = useState("");
+  const [pdfBusyKey, setPdfBusyKey] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -574,6 +614,52 @@ function ResultsInner() {
     URL.revokeObjectURL(url);
   }
 
+  async function downloadPdfScorecard(row, e) {
+    e?.stopPropagation?.();
+    if (!row) return;
+    const key = `${row.testId}-${row.id || row.userId || row.email || "row"}`;
+    setPdfBusyKey(key);
+    try {
+      await downloadMockTestScorecardPdf(row, {
+        companyLabel: groupLabel || companySlug,
+      });
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "Failed to download PDF scorecard.");
+    } finally {
+      setPdfBusyKey("");
+    }
+  }
+
+  async function downloadAllPdfScorecards() {
+    if (!rows.length) {
+      alert("No results to download.");
+      return;
+    }
+    if (
+      !confirm(
+        `Download ${rows.length} scorecard PDF${rows.length === 1 ? "" : "s"}? Your browser may ask to allow multiple downloads.`
+      )
+    ) {
+      return;
+    }
+    setPdfBusyKey("all");
+    try {
+      for (const row of rows) {
+        await downloadMockTestScorecardPdf(row, {
+          companyLabel: groupLabel || companySlug,
+        });
+        // Brief pause so browsers don't block successive downloads.
+        await new Promise((r) => setTimeout(r, 350));
+      }
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "Failed while downloading scorecards.");
+    } finally {
+      setPdfBusyKey("");
+    }
+  }
+
   function candidateLabel(row) {
     return row?.name || row?.email || row?.userId || "this candidate";
   }
@@ -644,8 +730,8 @@ function ResultsInner() {
 
     const ok = confirm(
       single
-        ? `Send WhatsApp result to ${candidateLabel(list[0])}?`
-        : `Send WhatsApp results to ${list.length} student${list.length === 1 ? "" : "s"} (current filter)?`
+        ? `Send exam_report WhatsApp with scorecard PDF to ${candidateLabel(list[0])}?`
+        : `Send exam_report WhatsApp with scorecard PDF to ${list.length} student${list.length === 1 ? "" : "s"} (current filter)?`
     );
     if (!ok) return;
 
@@ -662,7 +748,7 @@ function ResultsInner() {
       const recipients = [];
 
       for (const row of list) {
-        const key = String(row.userId || row.id || row.email || "");
+        const key = String(row.userId || row.id || row.email || row.phone || "");
         const info = recipientInfo.get(key) || { phone: "", eligible: false, skipReason: "no_phone" };
         if (!info.eligible) {
           if (info.skipReason === "staff") skippedStaff += 1;
@@ -678,6 +764,11 @@ function ResultsInner() {
           name: row.name || "Student",
           phone: info.phone,
           bodyParams: buildMockResultWhatsAppParams(row),
+          scorecardRow: buildMockExamReportScorecardPayload({
+            ...row,
+            phone: info.phone || row.phone || "",
+          }),
+          companyLabel: groupLabel || companySlug || "Mock Test",
         });
       }
 
@@ -687,7 +778,7 @@ function ResultsInner() {
             "No eligible students to message.",
             skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
             skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
-            "Add the student phone in Student Info, then try again.",
+            "Need a phone in Student Info, or on the result (public-link registration).",
           ]
             .filter(Boolean)
             .join("\n")
@@ -695,13 +786,14 @@ function ResultsInner() {
         return;
       }
 
-      const parallel = Math.min(40, Math.max(15, recipients.length));
+      const parallel = Math.min(8, Math.max(3, recipients.length));
       const res = await makeAuthenticatedRequest("/api/send-whatsapp-bulk", {
         method: "POST",
         body: JSON.stringify({
           template: MOCK_RESULT_WA_TEMPLATE,
           recipients,
           concurrency: parallel,
+          companyLabel: groupLabel || companySlug || "Mock Test",
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -716,7 +808,8 @@ function ResultsInner() {
         : "";
       alert(
         [
-          `WhatsApp sent: ${sent}/${recipients.length}`,
+          `WhatsApp exam_report sent: ${sent}/${recipients.length}`,
+          "Each message includes the student scorecard PDF.",
           failed ? `Failed: ${failed}` : null,
           skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
           skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
@@ -784,6 +877,15 @@ function ResultsInner() {
                 >
                   <Download className="h-4 w-4 shrink-0" />
                   Download Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadAllPdfScorecards}
+                  disabled={!rows.length || !!pdfBusyKey}
+                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-xl bg-white px-3 py-2 text-xs font-semibold text-[#00448a] hover:bg-sky-50 disabled:opacity-50 sm:px-4 sm:py-2.5 sm:text-sm"
+                >
+                  <FileDown className="h-4 w-4 shrink-0" />
+                  {pdfBusyKey === "all" ? "Downloading…" : "Download PDFs"}
                 </button>
               </div>
             </div>
@@ -1238,6 +1340,15 @@ function ResultsInner() {
                           <td className="px-4 py-3 text-right whitespace-nowrap">
                             <button
                               type="button"
+                              title="Download PDF scorecard"
+                              disabled={!!pdfBusyKey || !!deletingKey}
+                              onClick={(e) => downloadPdfScorecard(row, e)}
+                              className="mr-1 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#00448a]/25 text-[#00448a] hover:bg-[#00448a]/5 disabled:opacity-50"
+                            >
+                              <FileDown className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
                               title="Send WhatsApp result"
                               disabled={waSending || !!waSendingRowKey || !!deletingKey}
                               onClick={(e) => {
@@ -1433,6 +1544,15 @@ function ResultsInner() {
               )}
 
               <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+                <button
+                  type="button"
+                  disabled={!!pdfBusyKey || !!deletingKey}
+                  onClick={(e) => downloadPdfScorecard(detail, e)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-[#00448a]/25 bg-[#00448a]/5 px-3 py-2 text-sm font-medium text-[#00448a] hover:bg-[#00448a]/10 disabled:opacity-50"
+                >
+                  <FileDown className="h-4 w-4" />
+                  {pdfBusyKey && pdfBusyKey !== "all" ? "Downloading…" : "Download PDF scorecard"}
+                </button>
                 <button
                   type="button"
                   disabled={waSending || !!waSendingRowKey || !!deletingKey}

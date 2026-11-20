@@ -6,8 +6,13 @@ import {
   resolveWhatsAppTemplateLanguage,
   runWithConcurrency,
   sendWhatsAppTemplate,
+  uploadWhatsAppDocument,
   verifyWabaSender,
 } from "@/lib/whatsappTemplateSend";
+import {
+  buildMockTestScorecardPdfBuffer,
+  getMockTestScorecardFileName,
+} from "@/lib/mockTestScorecardPdf";
 
 const DEFAULT_CONCURRENCY = Number(process.env.WHATSAPP_BULK_CONCURRENCY || 20);
 
@@ -35,6 +40,7 @@ export async function POST(req) {
       recipients = [],
       concurrency = DEFAULT_CONCURRENCY,
       skipSenderVerify = false,
+      companyLabel = "",
     } = body || {};
 
     if (!template) {
@@ -44,9 +50,13 @@ export async function POST(req) {
       return NextResponse.json({ error: "recipients array is required" }, { status: 400 });
     }
 
+    const attachesScorecards = recipients.some((item) => item?.scorecardRow);
     const safeConcurrency = Math.max(
       1,
-      Math.min(40, Number(concurrency) || DEFAULT_CONCURRENCY)
+      Math.min(
+        attachesScorecards ? 8 : 40,
+        Number(concurrency) || (attachesScorecards ? 5 : DEFAULT_CONCURRENCY)
+      )
     );
     const languageUsed = resolveWhatsAppTemplateLanguage(template);
     const languagesTried = getWhatsAppTemplateLanguageCandidates(template);
@@ -66,7 +76,46 @@ export async function POST(req) {
           copyCodeButton,
           id,
           name,
+          scorecardRow,
+          documentFilename,
+          companyLabel: itemCompanyLabel,
         } = item || {};
+
+        let headerDocument = item?.headerDocument || null;
+
+        if (!headerDocument && scorecardRow) {
+          try {
+            const filename =
+              String(documentFilename || "").trim() ||
+              getMockTestScorecardFileName(scorecardRow);
+            const pdfBuffer = buildMockTestScorecardPdfBuffer(scorecardRow, {
+              companyLabel: itemCompanyLabel || companyLabel || "Mock Test",
+            });
+            const uploaded = await uploadWhatsAppDocument({
+              buffer: pdfBuffer,
+              filename,
+            });
+            if (!uploaded.ok) {
+              return {
+                id: id ?? null,
+                name: name ?? null,
+                phone: phone ?? null,
+                ok: false,
+                error: uploaded.error || "Failed to upload scorecard PDF",
+                errorCode: uploaded.status || null,
+              };
+            }
+            headerDocument = { id: uploaded.mediaId, filename };
+          } catch (err) {
+            return {
+              id: id ?? null,
+              name: name ?? null,
+              phone: phone ?? null,
+              ok: false,
+              error: err?.message || "Failed to build scorecard PDF",
+            };
+          }
+        }
 
         const result = await sendWhatsAppTemplate({
           phone,
@@ -76,6 +125,7 @@ export async function POST(req) {
           namedBodyParams,
           buttonParams,
           copyCodeButton,
+          headerDocument,
         });
 
         return {
@@ -92,6 +142,7 @@ export async function POST(req) {
           languagesTried: result.languagesTried ?? null,
           error: result.error ?? null,
           errorCode: result.errorCode ?? null,
+          scorecardAttached: Boolean(headerDocument),
         };
       }),
       senderPromise,

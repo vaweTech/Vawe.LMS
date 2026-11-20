@@ -10,10 +10,12 @@ import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import {
   blockMockTestAccount,
+  buildMockQuestionShuffleRanks,
   fetchMockTest,
   fetchMockTestAccountBlock,
   fetchMockTestGroup,
   formatMockSubSectionLabel,
+  getMockFullSectionMinutes,
   getMockQuestionSubSection,
   getMockRemainingSectionBasedMs,
   getMockScopeTiming,
@@ -22,7 +24,10 @@ import {
   isMockTestAccountBlocked,
   isMockTestLocked,
   MOCK_JUDGE_LANGUAGES,
+  mockSubSectionTimingKey,
   normalizeMockQuestionOptions,
+  normalizeMockSectionTimings,
+  normalizeMockSubSectionTimings,
   orderMockSectionsForExam,
   orderMockSubSectionsForExam,
   saveMockTestSubmission,
@@ -35,6 +40,7 @@ import {
 import { makeAuthenticatedRequest } from "@/lib/authUtils";
 import {
   MOCK_RESULT_WA_TEMPLATE,
+  buildMockExamReportScorecardPayload,
   buildMockResultWhatsAppParams,
   pickStudentPhone,
 } from "@/lib/mockTestResultWhatsApp";
@@ -47,6 +53,10 @@ import {
 } from "@/lib/mockTestPublicLinks";
 import { formatExamTime, useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
+import { downloadMockTestScorecardPdf } from "@/lib/mockTestScorecardPdf";
+
+const VAWE_INSTITUTE_HOME_URL = "https://www.vaweinstitute.com/";
+const INSTITUTE_REDIRECT_SECONDS = 300; // 5 minutes on scorecard
 
 function AuthGate({ publicMode, children }) {
   if (publicMode) return children;
@@ -166,12 +176,22 @@ function isCompileFailure(data, errorText) {
   return Boolean(compileOutput) || /compil/i.test(status) || /compil/i.test(errorText || "");
 }
 
+/** Visible sample cases only (max 2). Hidden cases stay for scoring, not for Run Code UI. */
+function getMockSampleTestCases(testCases, limit = 2) {
+  const cases = Array.isArray(testCases) ? testCases : [];
+  const visible = cases.filter((tc) => !tc?.hidden);
+  const pool = visible.length ? visible : cases;
+  return pool.slice(0, Math.max(0, limit));
+}
+
 async function runCodingTestCases(code, language, testCases) {
   const results = [];
   const cases = Array.isArray(testCases) ? testCases : [];
   for (let i = 0; i < cases.length; i++) {
     const tc = cases[i];
     const expected = String(tc?.output || "").trim();
+    const input = String(tc?.input || "");
+    const hidden = !!tc?.hidden;
     try {
       const res = await fetch("/api/compile", {
         method: "POST",
@@ -190,6 +210,8 @@ async function runCodingTestCases(code, language, testCases) {
         pass,
         actual,
         expected,
+        input,
+        hidden,
         error,
         status: String(data?.status || ""),
       });
@@ -199,6 +221,8 @@ async function runCodingTestCases(code, language, testCases) {
             pass: false,
             actual: "",
             expected: String(cases[j]?.output || "").trim(),
+            input: String(cases[j]?.input || ""),
+            hidden: !!cases[j]?.hidden,
             error: "Skipped — fix the compile error and run again.",
             skipped: true,
             status: "",
@@ -211,6 +235,8 @@ async function runCodingTestCases(code, language, testCases) {
         pass: false,
         actual: "",
         expected,
+        input,
+        hidden,
         error: err?.message || "Could not reach the compiler.",
         status: "Network error",
       });
@@ -218,6 +244,46 @@ async function runCodingTestCases(code, language, testCases) {
     }
   }
   return results;
+}
+
+function MockQuestionImage({ src }) {
+  const [open, setOpen] = useState(false);
+  const url = String(src || "").trim();
+  if (!url) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-3 block w-full text-left"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={url}
+          alt="Question"
+          className="max-w-full max-h-80 xl:max-h-[28rem] rounded-lg border border-gray-200 object-contain bg-gray-50"
+        />
+        <span className="mt-1 block text-[11px] text-gray-500">Click image to enlarge</span>
+      </button>
+      {open ? (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Question image"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={url}
+            alt="Question"
+            className="max-h-[90vh] max-w-full rounded-lg bg-white object-contain"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 function paletteButtonClass(status, isCurrent) {
@@ -258,10 +324,19 @@ function TakeMockTestPage() {
   const [startCountdown, setStartCountdown] = useState(null);
   const [examEnterVisible, setExamEnterVisible] = useState(false);
   const [startingExam, setStartingExam] = useState(false);
+  /** 1 = general instructions, 2 = section / sub-section timing table */
+  const [instructionsStep, setInstructionsStep] = useState(1);
+  /** Rank of each question index for this attempt (lower = earlier). Keeps answers keyed by original index. */
+  const [questionShuffleRank, setQuestionShuffleRank] = useState({});
+  const [embedInstituteSite, setEmbedInstituteSite] = useState(false);
+  const [instituteCountdown, setInstituteCountdown] = useState(null);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
   const didInitPart = useRef(false);
   const onScopeTimeUpRef = useRef(null);
   const advancingScopeRef = useRef(false);
   const countdownTimerRef = useRef(null);
+  const instituteTimerRef = useRef(null);
+  const instituteCountdownRef = useRef(null);
 
   useEffect(() => {
     if (!publicMode) {
@@ -527,14 +602,28 @@ function TakeMockTestPage() {
   );
 
   const sectionQuestions = useMemo(() => {
-    return allQuestionEntries.filter(({ q }) => {
+    const filtered = allQuestionEntries.filter(({ q }) => {
       const sec = String(q?.section || "").trim() || "General";
       if (sec !== activeSection) return false;
       if (!subSectionsInSection.length) return true;
       const sub = getMockQuestionSubSection(q) || "General";
       return sub === activeSubSection;
     });
-  }, [allQuestionEntries, activeSection, activeSubSection, subSectionsInSection]);
+    // Jumble within the current section / sub-section.
+    return [...filtered].sort((a, b) => {
+      const ra = Number(questionShuffleRank[a.index]);
+      const rb = Number(questionShuffleRank[b.index]);
+      const aRank = Number.isFinite(ra) ? ra : a.index;
+      const bRank = Number.isFinite(rb) ? rb : b.index;
+      return aRank - bRank;
+    });
+  }, [
+    allQuestionEntries,
+    activeSection,
+    activeSubSection,
+    subSectionsInSection,
+    questionShuffleRank,
+  ]);
 
   const currentPos = sectionQuestions.findIndex(({ index }) => index === activeIndex);
   const currentEntry = sectionQuestions[currentPos >= 0 ? currentPos : 0];
@@ -657,14 +746,47 @@ function TakeMockTestPage() {
       }
     }
 
+    const percent = mockTestAttemptPercent({ mcqCorrect, mcqTotal, codingScore, codingMax });
     const score = { mcqCorrect, mcqTotal, codingScore, codingMax };
     const sectionScores = buildMockSectionScores(questionBreakdown);
     const subSectionScores = buildMockSubSectionScores(questionBreakdown);
     const submittedAt = new Date().toISOString();
 
-    setScoreDetail(score);
+    const baseScorecard = {
+      ...score,
+      percent,
+      sectionScores,
+      subSectionScores,
+      questionBreakdown,
+      testTitle: test?.title || "Mock Test",
+      testId,
+      submittedAt,
+      companyLabel: groupLabel || companySlug || "Mock Test",
+    };
+
+    if (publicMode && publicSession) {
+      setScoreDetail({
+        ...baseScorecard,
+        name: publicSession.name || "",
+        email: "",
+        phone: normalizeMockPublicPhone(publicSession.phone),
+        college: publicSession.college || "",
+        branch: publicSession.branch || "",
+        source: "public_link",
+      });
+    } else {
+      setScoreDetail(baseScorecard);
+    }
     setSubmitted(true);
     markSubmitted();
+
+    try {
+      if (typeof document !== "undefined" && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+    } catch {
+      /* ignore */
+    }
 
     try {
       if (publicMode && publicSession?.phone && companySlug && testId) {
@@ -693,6 +815,8 @@ function TakeMockTestPage() {
         let name = user.displayName || "";
         let email = user.email || "";
         let phone = "";
+        let college = "";
+        let branch = "";
         if (db) {
           const [userSnap, studentSnap] = await Promise.all([
             getDoc(doc(db, "users", user.uid)),
@@ -703,14 +827,26 @@ function TakeMockTestPage() {
             name = studentData.name || name;
             email = studentData.email || email;
             phone = pickStudentPhone(studentData);
+            college = studentData.college || studentData.collegeName || "";
+            branch = studentData.branch || "";
           }
           if (userSnap.exists()) {
             const userData = userSnap.data() || {};
             name = userData.name || name;
             email = userData.email || email;
             if (!phone) phone = pickStudentPhone(userData);
+            if (!college) college = userData.college || userData.collegeName || "";
+            if (!branch) branch = userData.branch || "";
           }
         }
+        setScoreDetail((prev) => ({
+          ...(prev || baseScorecard),
+          name,
+          email,
+          phone,
+          college,
+          branch,
+        }));
         await saveMockTestSubmission(companySlug, testId, {
           userId: user.uid,
           name,
@@ -723,23 +859,30 @@ function TakeMockTestPage() {
           subSectionScores,
         });
         if (phone) {
+          const resultRow = {
+            name,
+            email,
+            phone,
+            college,
+            branch,
+            testTitle: test?.title || "Mock Test",
+            testId,
+            submittedAt,
+            ...score,
+            percent,
+            sectionScores,
+            subSectionScores,
+            questionBreakdown,
+          };
           const waRes = await makeAuthenticatedRequest("/api/send-whatsapp-template", {
             method: "POST",
             body: JSON.stringify({
               phone,
               template: MOCK_RESULT_WA_TEMPLATE,
               language: "en",
-              bodyParams: buildMockResultWhatsAppParams({
-                name,
-                testTitle: test?.title || "Mock Test",
-                testId,
-                submittedAt,
-                ...score,
-                percent: mockTestAttemptPercent(score),
-                sectionScores,
-                subSectionScores,
-                questionBreakdown,
-              }),
+              bodyParams: buildMockResultWhatsAppParams(resultRow),
+              scorecardRow: buildMockExamReportScorecardPayload(resultRow),
+              companyLabel: groupLabel || companySlug || "Mock Test",
             }),
           });
           if (!waRes.ok) {
@@ -759,6 +902,7 @@ function TakeMockTestPage() {
     companySlug,
     testId,
     test?.title,
+    groupLabel,
     publicMode,
     publicSession,
     publicLinkId,
@@ -770,6 +914,91 @@ function TakeMockTestPage() {
       alert("Time is up. Your test has been submitted automatically.");
     });
   }, [setOnTimeUp, finalizeSubmit]);
+
+  const isSequentialPublicPending =
+    publicMode &&
+    (publicSession?.mode === MOCK_PUBLIC_MODE_SEQUENTIAL ||
+      Number(publicSession?.totalSteps || 0) > 1);
+
+  useEffect(() => {
+    if (!submitted || !scoreDetail || isSequentialPublicPending) {
+      setInstituteCountdown(null);
+      return undefined;
+    }
+
+    setEmbedInstituteSite(false);
+    setInstituteCountdown(INSTITUTE_REDIRECT_SECONDS);
+
+    if (instituteCountdownRef.current) clearInterval(instituteCountdownRef.current);
+    if (instituteTimerRef.current) clearTimeout(instituteTimerRef.current);
+
+    instituteCountdownRef.current = setInterval(() => {
+      setInstituteCountdown((prev) => {
+        if (prev == null || prev <= 1) {
+          if (instituteCountdownRef.current) {
+            clearInterval(instituteCountdownRef.current);
+            instituteCountdownRef.current = null;
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    instituteTimerRef.current = setTimeout(() => {
+      if (instituteCountdownRef.current) {
+        clearInterval(instituteCountdownRef.current);
+        instituteCountdownRef.current = null;
+      }
+      setEmbedInstituteSite(true);
+    }, INSTITUTE_REDIRECT_SECONDS * 1000);
+
+    return () => {
+      if (instituteCountdownRef.current) {
+        clearInterval(instituteCountdownRef.current);
+        instituteCountdownRef.current = null;
+      }
+      if (instituteTimerRef.current) {
+        clearTimeout(instituteTimerRef.current);
+        instituteTimerRef.current = null;
+      }
+    };
+  }, [submitted, scoreDetail, isSequentialPublicPending]);
+
+  function formatInstituteCountdown(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
+  function openInstituteSiteNow() {
+    if (instituteCountdownRef.current) {
+      clearInterval(instituteCountdownRef.current);
+      instituteCountdownRef.current = null;
+    }
+    if (instituteTimerRef.current) {
+      clearTimeout(instituteTimerRef.current);
+      instituteTimerRef.current = null;
+    }
+    setInstituteCountdown(0);
+    setEmbedInstituteSite(true);
+  }
+
+  async function handleDownloadScorecard() {
+    if (!scoreDetail || pdfDownloading) return;
+    setPdfDownloading(true);
+    try {
+      await downloadMockTestScorecardPdf(scoreDetail, {
+        companyLabel: scoreDetail.companyLabel || companyLabel,
+      });
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "Failed to download scorecard.");
+    } finally {
+      setPdfDownloading(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -786,12 +1015,15 @@ function TakeMockTestPage() {
           setTest(data);
           const langs = {};
           const initialAnswers = {};
-          (data?.questions || []).forEach((q, idx) => {
+          const qList = Array.isArray(data?.questions) ? data.questions : [];
+          qList.forEach((q, idx) => {
             if (q?.type === "coding") {
               langs[idx] = q.language || "javascript";
               if (q.starterCode) initialAnswers[idx] = q.starterCode;
             }
           });
+          // Jumble questions for this attempt. A shared passage stays with its set.
+          setQuestionShuffleRank(buildMockQuestionShuffleRanks(qList));
           setCodeLanguages(langs);
           setAnswers(initialAnswers);
         }
@@ -883,12 +1115,17 @@ function TakeMockTestPage() {
       alert("Write your solution before running.");
       return;
     }
-    const testCases = Array.isArray(q?.testCases) ? q.testCases : [];
+    // Run only sample (non-hidden) cases — show at most 2. Hidden cases stay for final scoring.
+    const sampleCases = getMockSampleTestCases(q?.testCases, 2);
+    if (!sampleCases.length) {
+      alert("No sample test cases available for this question.");
+      return;
+    }
     setRunLoading((p) => ({ ...p, [currentIdx]: true }));
     const results = await runCodingTestCases(
       code,
       codeLanguages[currentIdx] || q?.language || "javascript",
-      testCases
+      sampleCases
     );
     setRunResults((p) => ({ ...p, [currentIdx]: results }));
     setRunLoading((p) => ({ ...p, [currentIdx]: false }));
@@ -1183,6 +1420,47 @@ function TakeMockTestPage() {
         ? `${durationMinutes} minutes`
         : "the allotted time";
 
+    const sectionTimingMap = normalizeMockSectionTimings(test?.sectionTimings);
+    const subTimingMap = normalizeMockSubSectionTimings(test?.subSectionTimings);
+    const timingTableRows = [];
+    let totalTimedMinutes = 0;
+    allSections.forEach((sec) => {
+      const subs = orderMockSubSectionsForExam(questions, sec, test?.subSectionOrder);
+      const sectionMins = getMockFullSectionMinutes(
+        sec,
+        questions,
+        test?.sectionTimings,
+        test?.subSectionTimings
+      );
+      if (subs.length) {
+        subs.forEach((sub) => {
+          const key = mockSubSectionTimingKey(sec, sub);
+          const mins = Number(subTimingMap[key]) || 0;
+          totalTimedMinutes += mins;
+          timingTableRows.push({
+            key: `${sec}||${sub}`,
+            section: sec,
+            subSection: formatMockSubSectionLabel(questions, sec, sub),
+            minutes: mins,
+            kind: "subsection",
+          });
+        });
+      } else {
+        const mins = Number(sectionTimingMap[sec]) || sectionMins || 0;
+        totalTimedMinutes += mins;
+        timingTableRows.push({
+          key: sec,
+          section: sec,
+          subSection: "—",
+          minutes: mins,
+          kind: "section",
+        });
+      }
+    });
+    if (!timingEnabled && durationMinutes > 0 && totalTimedMinutes <= 0) {
+      totalTimedMinutes = durationMinutes;
+    }
+
     return (
       <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh bg-white">
@@ -1200,10 +1478,14 @@ function TakeMockTestPage() {
             <div className="mb-4">
               <p className="text-sm text-[#00448a] font-medium">{companyLabel}</p>
               <h1 className="text-2xl sm:text-3xl font-bold text-black mt-1">
-                Instruction for Online Test
+                {instructionsStep === 1
+                  ? "Instructions for Online Test"
+                  : "Section & Sub-section Timings"}
               </h1>
               <p className="mt-2 text-sm sm:text-base font-medium text-red-600">
-                Please read the Instructions carefully before starting the test.
+                {instructionsStep === 1
+                  ? "Please read the Instructions carefully before starting the test."
+                  : "Review the time allotted for each section and sub-section, then start the test."}
               </p>
               <p className="mt-2 text-sm text-gray-700">
                 <span className="font-semibold">{test.title || "Mock Test"}</span>
@@ -1214,157 +1496,281 @@ function TakeMockTestPage() {
                   ? ` · Candidate: ${publicSession.name}`
                   : ""}
               </p>
-            </div>
-
-            <ol className="list-decimal pl-5 sm:pl-6 space-y-3 text-sm sm:text-[15px] text-black leading-relaxed">
-              <li>
-                Total number of questions : <strong>{totalQuestions || "—"}</strong>
-                {summary.mcq || summary.coding
-                  ? ` (MCQ: ${summary.mcq}, Coding: ${summary.coding})`
-                  : ""}
-                .
-              </li>
-              {allSections.length > 0 ? (
-                <li>
-                  Sections (in order):{" "}
-                  <strong>{allSections.join(" → ")}</strong>
-                  .
-                </li>
-              ) : null}
-              <li>
-                The total duration of the test is <strong>{timingLabel}</strong>. A countdown timer
-                at the top right of the screen shows the time left
-                {timingEnabled ? " for the current section / sub-section" : ""}.
-              </li>
-              <li>
-                The Question Palette on the right shows all question numbers for the current
-                section. Use it to jump between questions.
-              </li>
-              <li>
-                The status of each question is shown with colours as explained below:
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full max-w-xl border border-gray-400 text-sm border-collapse">
-                    <tbody>
-                      {[
-                        { color: "bg-red-500", label: "Not answered / Not Attempted Question." },
-                        { color: "bg-green-500", label: "Answered / Attempted Question." },
-                        {
-                          color: "bg-yellow-400",
-                          label: "Not Answered & Marked for review.",
-                        },
-                        {
-                          color: "bg-violet-500",
-                          label: "Answered & Marked for Review.",
-                        },
-                        { color: "bg-gray-400", label: "Dumped / Skipped." },
-                        {
-                          color: "bg-white border border-gray-400",
-                          label: "Not Visited.",
-                        },
-                        {
-                          color: "bg-orange-500",
-                          label: "Current Question.",
-                        },
-                      ].map((row) => (
-                        <tr key={row.label} className="border border-gray-400">
-                          <td className="w-28 sm:w-36 p-2 border border-gray-400 align-middle">
-                            <span
-                              className={`inline-block h-7 w-10 sm:w-12 rounded-sm ${row.color}`}
-                            />
-                          </td>
-                          <td className="p-2 sm:p-2.5 border border-gray-400 text-black">
-                            {row.label}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </li>
-              <li>
-                You can shuffle between questions within a section using the palette or{" "}
-                <strong>Save &amp; Next</strong>.
-              </li>
-              <li>
-                Fullscreen is required (Chrome / desktop). Do not leave this tab — leaving the page
-                shows a warning. After <strong>3 tab switches</strong> the test is blocked.
-              </li>
-              <li>Copying question text is not allowed.</li>
-              {timingEnabled ? (
-                <li>
-                  Section / sub-section timers are enabled. You cannot move to another section until
-                  the time is out — then it moves automatically.
-                </li>
-              ) : (
-                <li>
-                  You may move between sections freely until the overall test time ends.
-                </li>
-              )}
-              <li>
-                Coding questions appear in the last section(s) as sub-sections labeled{" "}
-                <strong>Coding Easy</strong> / <strong>Coding Hard</strong> (as configured).
-              </li>
-              <li>
-                <strong>Submit Test</strong> stays disabled until the last{" "}
-                <strong>5 minutes</strong> of the test. When the final section / sub-section time
-                ends, the test is submitted automatically.
-              </li>
-              <li>
-                After submission you cannot change answers. Make sure you have attempted all
-                required questions.
-              </li>
-              <li>
-                Do not refresh or close the browser during the test. Progress may be lost if you
-                leave without submitting.
-              </li>
-              <li>
-                For coding questions, select the language, write your solution, and use{" "}
-                <strong>Run Code</strong> to check sample cases before moving on.
-              </li>
-            </ol>
-
-            <div className="mt-8 pt-5 border-t border-gray-200 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                <label className="text-sm font-medium text-black shrink-0">
-                  Choose your default language
-                </label>
-                <select
-                  defaultValue="English"
-                  className="border border-gray-400 rounded px-3 py-2 text-sm bg-white max-w-xs"
+              <div className="mt-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                <span
+                  className={`inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full px-2 ${
+                    instructionsStep === 1
+                      ? "bg-[#00448a] text-white"
+                      : "bg-slate-200 text-slate-600"
+                  }`}
                 >
-                  <option>English</option>
-                </select>
-              </div>
-
-              <label className="flex items-start gap-2.5 text-sm text-black cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={secure.acceptedRules}
-                  onChange={(e) => secure.setAcceptedRules(e.target.checked)}
-                  className="mt-1 h-4 w-4 accent-[#00448a]"
-                />
-                <span>
-                  The computer provided to me is in proper working condition. I have read and
-                  understood the instructions given above.
+                  1
                 </span>
-              </label>
-
-              <div className="pt-2 flex justify-center sm:justify-start">
-                <button
-                  type="button"
-                  onClick={beginStartCountdown}
-                  disabled={
-                    !secure.acceptedRules ||
-                    startingExam ||
-                    startCountdown != null ||
-                    (publicMode && !publicSession?.phoneVerified)
-                  }
-                  className="min-w-[160px] px-8 py-3 rounded bg-[#003366] hover:bg-[#00264d] text-white text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+                <span className={instructionsStep === 1 ? "text-[#00448a]" : ""}>Rules</span>
+                <span className="text-slate-300">→</span>
+                <span
+                  className={`inline-flex h-6 min-w-[1.5rem] items-center justify-center rounded-full px-2 ${
+                    instructionsStep === 2
+                      ? "bg-[#00448a] text-white"
+                      : "bg-slate-200 text-slate-600"
+                  }`}
                 >
-                  {startingExam || startCountdown != null ? "Starting…" : "Start Test"}
-                </button>
+                  2
+                </span>
+                <span className={instructionsStep === 2 ? "text-[#00448a]" : ""}>Timings</span>
               </div>
             </div>
+
+            {instructionsStep === 1 ? (
+              <>
+                <ol className="list-decimal pl-5 sm:pl-6 space-y-3 text-sm sm:text-[15px] text-black leading-relaxed">
+                  <li>
+                    Total number of questions : <strong>{totalQuestions || "—"}</strong>
+                    {summary.mcq || summary.coding
+                      ? ` (MCQ: ${summary.mcq}, Coding: ${summary.coding})`
+                      : ""}
+                    .
+                  </li>
+                  {allSections.length > 0 ? (
+                    <li>
+                      Sections (in order):{" "}
+                      <strong>{allSections.join(" → ")}</strong>
+                      .
+                    </li>
+                  ) : null}
+                  <li>
+                    The total duration of the test is <strong>{timingLabel}</strong>. A countdown
+                    timer at the top right of the screen shows the time left
+                    {timingEnabled ? " for the current section / sub-section" : ""}.
+                  </li>
+                  <li>
+                    The Question Palette on the right shows all question numbers for the current
+                    section. Use it to jump between questions.
+                  </li>
+                  <li>
+                    The status of each question is shown with colours as explained below:
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full max-w-xl border border-gray-400 text-sm border-collapse">
+                        <tbody>
+                          {[
+                            { color: "bg-red-500", label: "Not answered / Not Attempted Question." },
+                            { color: "bg-green-500", label: "Answered / Attempted Question." },
+                            {
+                              color: "bg-yellow-400",
+                              label: "Not Answered & Marked for review.",
+                            },
+                            {
+                              color: "bg-violet-500",
+                              label: "Answered & Marked for Review.",
+                            },
+                            { color: "bg-gray-400", label: "Dumped / Skipped." },
+                            {
+                              color: "bg-white border border-gray-400",
+                              label: "Not Visited.",
+                            },
+                            {
+                              color: "bg-orange-500",
+                              label: "Current Question.",
+                            },
+                          ].map((row) => (
+                            <tr key={row.label} className="border border-gray-400">
+                              <td className="w-28 sm:w-36 p-2 border border-gray-400 align-middle">
+                                <span
+                                  className={`inline-block h-7 w-10 sm:w-12 rounded-sm ${row.color}`}
+                                />
+                              </td>
+                              <td className="p-2 sm:p-2.5 border border-gray-400 text-black">
+                                {row.label}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </li>
+                  <li>
+                    Questions within each section are <strong>jumbled</strong> for every attempt.
+                    Questions that share a passage stay together. You can move between them using
+                    the palette or <strong>Save &amp; Next</strong>.
+                  </li>
+                  <li>
+                    Fullscreen is required (Chrome / desktop). Do not leave this tab — leaving the
+                    page shows a warning. After <strong>3 tab switches</strong> the test is blocked.
+                  </li>
+                  <li>Copying question text is not allowed.</li>
+                  {timingEnabled ? (
+                    <li>
+                      Section / sub-section timers are enabled. You cannot move to another section
+                      until the time is out — then it moves automatically.
+                    </li>
+                  ) : (
+                    <li>
+                      You may move between sections freely until the overall test time ends.
+                    </li>
+                  )}
+                  <li>
+                    Coding questions appear in the last section(s) as sub-sections labeled{" "}
+                    <strong>Coding Easy</strong> / <strong>Coding Hard</strong> (as configured).
+                  </li>
+                  <li>
+                    <strong>Submit Test</strong> stays disabled until the last{" "}
+                    <strong>5 minutes</strong> of the test. When the final section / sub-section
+                    time ends, the test is submitted automatically.
+                  </li>
+                  <li>
+                    After submission you cannot change answers. Make sure you have attempted all
+                    required questions.
+                  </li>
+                  <li>
+                    Do not refresh or close the browser during the test. Progress may be lost if you
+                    leave without submitting.
+                  </li>
+                  <li>
+                    For coding questions, select the language, write your solution, and use{" "}
+                    <strong>Run Code</strong> to check sample cases before moving on.
+                  </li>
+                </ol>
+
+                <div className="mt-8 pt-5 border-t border-gray-200 flex justify-center sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInstructionsStep(2);
+                      if (typeof window !== "undefined") {
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }
+                    }}
+                    className="min-w-[160px] px-8 py-3 rounded bg-[#003366] hover:bg-[#00264d] text-white text-base font-semibold"
+                  >
+                    Next
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/80 overflow-hidden shadow-sm">
+                  <div className="bg-[#00448a] px-4 py-3 sm:px-5 text-white">
+                    <p className="text-sm font-semibold">Test time plan</p>
+                    <p className="text-xs text-white/80 mt-0.5">
+                      {timingEnabled
+                        ? "Timers apply per section / sub-section. You move ahead only when time ends."
+                        : durationMinutes
+                          ? `Overall test duration: ${durationMinutes} minutes.`
+                          : "No section timers configured — overall test time applies if set."}
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[520px] text-sm">
+                      <thead>
+                        <tr className="bg-white text-left text-slate-600 border-b border-slate-200">
+                          <th className="px-4 py-3 font-semibold w-12">#</th>
+                          <th className="px-4 py-3 font-semibold">Section</th>
+                          <th className="px-4 py-3 font-semibold">Sub-section</th>
+                          <th className="px-4 py-3 font-semibold text-right">Time (min)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {timingTableRows.length ? (
+                          timingTableRows.map((row, idx) => (
+                            <tr
+                              key={row.key}
+                              className="border-t border-slate-100 bg-white odd:bg-slate-50/60"
+                            >
+                              <td className="px-4 py-2.5 text-slate-500 tabular-nums">{idx + 1}</td>
+                              <td className="px-4 py-2.5 font-medium text-slate-900">
+                                {row.section}
+                              </td>
+                              <td className="px-4 py-2.5 text-slate-700">{row.subSection}</td>
+                              <td className="px-4 py-2.5 text-right">
+                                <span className="inline-flex min-w-[3rem] justify-end rounded-lg bg-[#00448a]/10 px-2.5 py-1 text-sm font-semibold tabular-nums text-[#00448a]">
+                                  {row.minutes > 0 ? row.minutes : "—"}
+                                </span>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                              No sections found for this test.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                      {timingTableRows.length ? (
+                        <tfoot>
+                          <tr className="border-t-2 border-slate-200 bg-[#00448a]/5">
+                            <td className="px-4 py-3" colSpan={3}>
+                              <span className="text-sm font-semibold text-slate-900">
+                                Total timed duration
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <span className="inline-flex rounded-lg bg-[#00448a] px-3 py-1 text-sm font-bold tabular-nums text-white">
+                                {totalTimedMinutes > 0
+                                  ? `${totalTimedMinutes} min`
+                                  : durationMinutes
+                                    ? `${durationMinutes} min`
+                                    : "—"}
+                              </span>
+                            </td>
+                          </tr>
+                        </tfoot>
+                      ) : null}
+                    </table>
+                  </div>
+                </div>
+
+                <div className="mt-8 pt-5 border-t border-gray-200 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                    <label className="text-sm font-medium text-black shrink-0">
+                      Choose your default language
+                    </label>
+                    <select
+                      defaultValue="English"
+                      className="border border-gray-400 rounded px-3 py-2 text-sm bg-white max-w-xs"
+                    >
+                      <option>English</option>
+                    </select>
+                  </div>
+
+                  <label className="flex items-start gap-2.5 text-sm text-black cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={secure.acceptedRules}
+                      onChange={(e) => secure.setAcceptedRules(e.target.checked)}
+                      className="mt-1 h-4 w-4 accent-[#00448a]"
+                    />
+                    <span>
+                      The computer provided to me is in proper working condition. I have read and
+                      understood the instructions and the timing table above.
+                    </span>
+                  </label>
+
+                  <div className="pt-2 flex flex-wrap items-center justify-center sm:justify-between gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setInstructionsStep(1)}
+                      className="min-w-[120px] px-6 py-3 rounded border border-slate-300 bg-white text-slate-800 text-base font-semibold hover:bg-slate-50"
+                    >
+                      Back
+                    </button>
+                    <button
+                      type="button"
+                      onClick={beginStartCountdown}
+                      disabled={
+                        !secure.acceptedRules ||
+                        startingExam ||
+                        startCountdown != null ||
+                        (publicMode && !publicSession?.phoneVerified)
+                      }
+                      className="min-w-[160px] px-8 py-3 rounded bg-[#003366] hover:bg-[#00264d] text-white text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+                    >
+                      {startingExam || startCountdown != null ? "Starting…" : "Start Test"}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
           {startCountdown != null ? (
@@ -1418,47 +1824,252 @@ function TakeMockTestPage() {
   }
 
   if (submitted && scoreDetail) {
-    const isSequentialPublic =
-      publicMode &&
-      (publicSession?.mode === MOCK_PUBLIC_MODE_SEQUENTIAL ||
-        Number(publicSession?.totalSteps || 0) > 1);
+    const percent = Math.round(Number(scoreDetail.percent) || 0);
+    const performance =
+      percent >= 80
+        ? "Excellent"
+        : percent >= 60
+          ? "Good"
+          : percent >= 40
+            ? "Average"
+            : "Needs Improvement";
+    const performanceClass =
+      percent >= 80
+        ? "text-green-600"
+        : percent >= 60
+          ? "text-yellow-600"
+          : percent >= 40
+            ? "text-orange-600"
+            : "text-red-600";
+    const sectionList = Object.values(scoreDetail.sectionScores || {}).filter(
+      (s) => Number(s?.max) > 0
+    );
+    const earnedTotal =
+      (Number(scoreDetail.mcqCorrect) || 0) + (Number(scoreDetail.codingScore) || 0);
+    const maxTotal =
+      (Number(scoreDetail.mcqTotal) || 0) + (Number(scoreDetail.codingMax) || 0);
+
     return (
       <AuthGate publicMode={publicMode}>
-        <div className="min-h-dvh flex items-center justify-center bg-gray-100 px-4">
-          <div className="max-w-md w-full bg-white rounded-2xl border shadow-lg p-8 text-center">
-            <h1 className="text-2xl font-bold text-gray-900 mb-4">Test Submitted</h1>
-            <div className="space-y-2 text-left bg-green-50 border border-green-200 rounded-xl p-4 mb-6">
-              <p className="font-semibold text-green-900">Results</p>
-              <p className="text-green-800">MCQ: {scoreDetail.mcqCorrect} / {scoreDetail.mcqTotal}</p>
-              {scoreDetail.codingMax > 0 && (
-                <p className="text-green-800">
-                  Coding: {Math.round(scoreDetail.codingScore)} / {scoreDetail.codingMax}
-                </p>
-              )}
-            </div>
-            <div className="flex flex-col gap-2">
-              {isSequentialPublic ? (
+        <div
+          className={`fixed inset-0 z-50 bg-gradient-to-b from-sky-50 to-cyan-50 ${
+            embedInstituteSite ? "flex flex-col overflow-hidden" : "overflow-y-auto"
+          }`}
+        >
+          {embedInstituteSite ? (
+            <div className="flex flex-col flex-1 min-h-0 bg-white">
+              <div className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-gray-200 bg-white shadow-sm">
+                <span className="text-sm font-semibold text-gray-900">VAWE Institute</span>
                 <button
                   type="button"
-                  onClick={continueSequentialPublic}
-                  disabled={nextSequentialBusy}
-                  className="inline-block px-6 py-3 rounded-lg bg-[#00448a] text-white font-medium disabled:opacity-60"
+                  onClick={() => setEmbedInstituteSite(false)}
+                  className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-800 hover:bg-gray-50"
                 >
-                  {nextSequentialBusy ? "Loading next…" : "Continue to next test"}
+                  Back to scorecard
                 </button>
-              ) : null}
-              <Link
-                href={
-                  publicMode
-                    ? `/mock-test/public/${encodeURIComponent(publicLinkId)}`
-                    : `/mock-test/${companySlug}`
-                }
-                className="inline-block px-6 py-3 rounded-lg border border-slate-200 text-slate-800 font-medium"
-              >
-                {publicMode ? "Done" : `Back to ${companyLabel}`}
-              </Link>
+              </div>
+              <iframe
+                title="VAWE Institute"
+                src={VAWE_INSTITUTE_HOME_URL}
+                className="w-full flex-1 min-h-0 border-0 bg-white"
+                style={{ height: "calc(100dvh - 52px)" }}
+              />
+              <p className="shrink-0 text-[11px] text-gray-500 px-4 py-2 border-t border-gray-100 bg-gray-50">
+                Same tab — the site loads here. If you only see a blank area, the site may block
+                embedding; open{" "}
+                <a
+                  href={VAWE_INSTITUTE_HOME_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[#00448a] underline"
+                >
+                  vaweinstitute.com
+                </a>{" "}
+                instead.
+              </p>
             </div>
-          </div>
+          ) : (
+            <div className="min-h-dvh flex items-center justify-center p-4 py-6">
+              <div className="w-full max-w-2xl">
+                <div className="text-center mb-4">
+                  <h1 className="text-2xl sm:text-3xl font-bold text-[#0c4a6e] mb-1">
+                    {scoreDetail.testTitle || test?.title || "Mock Test"}
+                  </h1>
+                  <p className="text-sm sm:text-base text-gray-600">
+                    {companyLabel} · Scorecard
+                  </p>
+                </div>
+
+                <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+                  <p className="text-xs sm:text-sm text-gray-700 mb-0.5">
+                    <strong>Name:</strong> {scoreDetail.name || "—"}
+                  </p>
+                  {scoreDetail.phone ? (
+                    <p className="text-xs sm:text-sm text-gray-700 mb-0.5">
+                      <strong>Phone:</strong> {scoreDetail.phone}
+                    </p>
+                  ) : null}
+                  {scoreDetail.email ? (
+                    <p className="text-xs sm:text-sm text-gray-700 mb-0.5">
+                      <strong>Email:</strong> {scoreDetail.email}
+                    </p>
+                  ) : null}
+                  {(scoreDetail.college || scoreDetail.branch) && (
+                    <p className="text-xs sm:text-sm text-gray-700 mb-0.5">
+                      <strong>College / Branch:</strong>{" "}
+                      {[scoreDetail.college, scoreDetail.branch].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                  <p className="text-xs sm:text-sm text-gray-700">
+                    <strong>Date:</strong>{" "}
+                    {scoreDetail.submittedAt
+                      ? new Date(scoreDetail.submittedAt).toLocaleString()
+                      : new Date().toLocaleString()}
+                  </p>
+                </div>
+
+                <div className="bg-gradient-to-r from-cyan-500 to-blue-600 rounded-lg p-5 sm:p-6 mb-4 text-white shadow-lg">
+                  <div className="text-center">
+                    <p className="text-xs sm:text-sm font-medium opacity-90 mb-2">Total Score</p>
+                    <div className="flex items-baseline justify-center gap-2 mb-1">
+                      <span className="text-4xl sm:text-5xl font-bold">
+                        {Math.round(earnedTotal * 10) / 10}
+                      </span>
+                      <span className="text-xl sm:text-2xl font-semibold opacity-80">
+                        / {Math.round(maxTotal)}
+                      </span>
+                    </div>
+                    <div className="mt-4">
+                      <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-white/20 rounded-full backdrop-blur-sm">
+                        <span className="text-base sm:text-lg font-bold">{percent}%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className={`grid gap-3 mb-4 ${
+                    Number(scoreDetail.codingMax) > 0 ? "sm:grid-cols-2" : "sm:grid-cols-1"
+                  }`}
+                >
+                  <div className="bg-white rounded-lg shadow-md p-4 border-2 border-emerald-200">
+                    <h3 className="text-sm sm:text-base font-bold text-gray-900 mb-3">MCQ Section</h3>
+                    <div className="flex items-baseline gap-1.5 mb-1.5">
+                      <span className="text-3xl sm:text-4xl font-bold text-gray-900">
+                        {scoreDetail.mcqCorrect || 0}
+                      </span>
+                      <span className="text-base sm:text-lg text-gray-600">
+                        / {scoreDetail.mcqTotal || 0}
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-gray-600 mt-1.5">
+                      Correct answers out of total MCQs
+                    </p>
+                  </div>
+                  {Number(scoreDetail.codingMax) > 0 ? (
+                    <div className="bg-white rounded-lg shadow-md p-4 border-2 border-blue-200">
+                      <h3 className="text-sm sm:text-base font-bold text-gray-900 mb-3">
+                        Coding Section
+                      </h3>
+                      <div className="flex items-baseline gap-1.5 mb-1.5">
+                        <span className="text-3xl sm:text-4xl font-bold text-gray-900">
+                          {Math.round(Number(scoreDetail.codingScore) || 0)}
+                        </span>
+                        <span className="text-base sm:text-lg text-gray-600">
+                          / {scoreDetail.codingMax || 0}
+                        </span>
+                      </div>
+                      <p className="text-xs sm:text-sm text-gray-600 mt-1.5">
+                        Based on test case results
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+
+                {sectionList.length > 0 ? (
+                  <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+                    <h3 className="text-sm font-bold text-gray-900 mb-3">Section-wise scores</h3>
+                    <div className="space-y-2">
+                      {sectionList.map((sec) => (
+                        <div
+                          key={sec.section}
+                          className="flex items-center justify-between gap-3 text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0"
+                        >
+                          <span className="font-medium text-gray-800">{sec.section}</span>
+                          <span className="text-gray-700 tabular-nums">
+                            {Math.round(Number(sec.earned) || 0)}/{Math.round(Number(sec.max) || 0)}{" "}
+                            <span className="text-gray-500">
+                              ({Math.round(Number(sec.percent) || 0)}%)
+                            </span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="bg-white rounded-lg shadow-md p-4 mb-4 border-t-2 border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs sm:text-sm font-medium text-gray-700">Performance</span>
+                    <span className={`text-sm sm:text-base font-bold ${performanceClass}`}>
+                      {performance}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-center space-y-3">
+                  <div className="flex flex-col sm:flex-row gap-2.5 justify-center">
+                    <button
+                      type="button"
+                      onClick={handleDownloadScorecard}
+                      disabled={pdfDownloading}
+                      className="px-5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors text-xs sm:text-sm disabled:opacity-60"
+                    >
+                      {pdfDownloading ? "Preparing PDF…" : "Download Scorecard (PDF)"}
+                    </button>
+                    {!isSequentialPublicPending ? (
+                      <button
+                        type="button"
+                        onClick={openInstituteSiteNow}
+                        className="px-5 py-2 bg-[#00448a] hover:bg-[#003a76] text-white rounded-lg font-medium transition-colors text-xs sm:text-sm"
+                      >
+                        View VAWE Institute
+                      </button>
+                    ) : null}
+                    {isSequentialPublicPending ? (
+                      <button
+                        type="button"
+                        onClick={continueSequentialPublic}
+                        disabled={nextSequentialBusy}
+                        className="px-5 py-2 bg-[#00448a] hover:bg-[#003a76] text-white rounded-lg font-medium disabled:opacity-60 text-xs sm:text-sm"
+                      >
+                        {nextSequentialBusy ? "Loading next…" : "Continue to next test"}
+                      </button>
+                    ) : null}
+                  </div>
+                  {!isSequentialPublicPending && instituteCountdown != null ? (
+                    <p className="text-xs text-gray-600">
+                      The institute site will open{" "}
+                      <span className="font-medium text-gray-800">on this same page</span> in{" "}
+                      <span className="font-semibold text-cyan-600 text-sm">
+                        {formatInstituteCountdown(instituteCountdown)}
+                      </span>
+                    </p>
+                  ) : null}
+                  <Link
+                    href={
+                      publicMode
+                        ? `/mock-test/public/${encodeURIComponent(publicLinkId)}`
+                        : `/mock-test/${companySlug}`
+                    }
+                    className="inline-block text-sm text-slate-600 hover:text-[#00448a] underline"
+                  >
+                    {publicMode ? "Back to public link" : `Back to ${companyLabel}`}
+                  </Link>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </AuthGate>
     );
@@ -1466,6 +2077,20 @@ function TakeMockTestPage() {
 
   const isMcq = (currentQ?.type || "mcq") === "mcq";
   const options = isMcq ? normalizeMockQuestionOptions(currentQ?.options) : [];
+  const passageText = String(currentQ?.description || "").trim();
+  const passageGroupId = String(currentQ?.passageGroup || "").trim();
+  const passagePositions = passageGroupId
+    ? sectionQuestions.reduce((acc, entry, index) => {
+        if (String(entry.q?.passageGroup || "").trim() === passageGroupId) acc.push(index + 1);
+        return acc;
+      }, [])
+    : [];
+  const passageNote =
+    passagePositions.length > 1
+      ? passagePositions.every((n, i) => i === 0 || n === passagePositions[i - 1] + 1)
+        ? `Same passage for questions ${passagePositions[0]}–${passagePositions[passagePositions.length - 1]}`
+        : `Same passage for questions ${passagePositions.join(", ")}`
+      : "";
   const codingResults = runResults[currentIdx] || [];
 
   return (
@@ -1667,14 +2292,23 @@ function TakeMockTestPage() {
 
                   {isMcq ? (
                     <div className="p-3 xl:p-5">
+                      {passageText ? (
+                        <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50 px-3 py-3 xl:px-4 xl:py-4">
+                          <p className="text-[10px] xl:text-xs font-semibold uppercase tracking-wide text-[#00448a]">
+                            Passage
+                          </p>
+                          {passageNote ? (
+                            <p className="mt-1 text-[11px] xl:text-xs text-[#00448a]/80">{passageNote}</p>
+                          ) : null}
+                          <p className="mt-2 text-sm xl:text-[15px] text-slate-800 leading-relaxed whitespace-pre-wrap">
+                            {passageText}
+                          </p>
+                        </div>
+                      ) : null}
                       <p className="text-sm xl:text-base font-semibold text-gray-900 leading-relaxed whitespace-pre-wrap">
                         {currentQ.question || currentQ.title || "Question"}
                       </p>
-                      {currentQ.description ? (
-                        <p className="mt-2 xl:mt-3 text-xs xl:text-sm text-gray-600 whitespace-pre-wrap">
-                          {currentQ.description}
-                        </p>
-                      ) : null}
+                      <MockQuestionImage src={currentQ.questionImage} />
                       <div className="mt-3 xl:mt-4 space-y-1.5 xl:space-y-2">
                         {options.map((option, optIdx) => {
                           const selected = answers[currentIdx] === optIdx;
@@ -1715,23 +2349,33 @@ function TakeMockTestPage() {
                           <pre className="text-xs xl:text-sm text-gray-900 leading-relaxed whitespace-pre-wrap font-sans">
                             {currentQ.question || currentQ.title || "Question"}
                           </pre>
+                          <MockQuestionImage src={currentQ.questionImage} />
                         </div>
                         {currentQ.description ? (
                           <p className="text-xs xl:text-sm text-gray-600 whitespace-pre-wrap">
                             {currentQ.description}
                           </p>
                         ) : null}
-                        {(currentQ.testCases || []).length > 0 && (
+                        {getMockSampleTestCases(currentQ.testCases, 2).length > 0 && (
                           <div className="rounded-lg border bg-gray-50 p-2.5 xl:p-3 text-[11px] xl:text-xs">
                             <p className="font-semibold mb-2">Sample test cases</p>
-                            {(currentQ.testCases || []).slice(0, 2).map((tc, i) => (
-                              <div key={i} className="grid grid-cols-1 xl:grid-cols-2 gap-2 mb-2 last:mb-0">
-                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
-                                  {tc.input || "—"}
-                                </pre>
-                                <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
-                                  {tc.output || "—"}
-                                </pre>
+                            {getMockSampleTestCases(currentQ.testCases, 2).map((tc, i) => (
+                              <div key={i} className="mb-2 last:mb-0 space-y-1">
+                                <p className="text-[10px] font-medium text-gray-500">Sample {i + 1}</p>
+                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+                                  <div>
+                                    <p className="text-[10px] text-gray-500 mb-0.5">Input</p>
+                                    <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                      {tc.input || "—"}
+                                    </pre>
+                                  </div>
+                                  <div>
+                                    <p className="text-[10px] text-gray-500 mb-0.5">Expected output</p>
+                                    <pre className="bg-white border rounded p-2 whitespace-pre-wrap">
+                                      {tc.output || "—"}
+                                    </pre>
+                                  </div>
+                                </div>
                               </div>
                             ))}
                           </div>
@@ -1768,28 +2412,68 @@ function TakeMockTestPage() {
                           spellCheck={false}
                         />
                         {codingResults.length > 0 && (
-                          <div className="mt-2 shrink-0 max-h-44 overflow-y-auto space-y-2">
-                            <div className="text-[11px] xl:text-sm space-y-1">
+                          <div className="mt-2 shrink-0 max-h-56 overflow-y-auto space-y-2">
+                            <div className="text-[11px] xl:text-sm space-y-2">
                               {codingResults.map((r, i) => (
-                                <p
+                                <div
                                   key={i}
-                                  className={
+                                  className={`rounded-lg border p-2 ${
                                     r.pass
-                                      ? "text-green-700"
+                                      ? "border-green-200 bg-green-50"
                                       : r.skipped
-                                        ? "text-amber-700"
-                                        : "text-red-700"
-                                  }
+                                        ? "border-amber-200 bg-amber-50"
+                                        : "border-red-200 bg-red-50"
+                                  }`}
                                 >
-                                  Case {i + 1}:{" "}
-                                  {r.pass
-                                    ? "Passed"
-                                    : r.skipped
-                                      ? "Skipped"
-                                      : r.error
-                                        ? "Error"
-                                        : "Failed"}
-                                </p>
+                                  <p
+                                    className={`font-semibold ${
+                                      r.pass
+                                        ? "text-green-800"
+                                        : r.skipped
+                                          ? "text-amber-800"
+                                          : "text-red-800"
+                                    }`}
+                                  >
+                                    Sample {i + 1}:{" "}
+                                    {r.pass
+                                      ? "Passed"
+                                      : r.skipped
+                                        ? "Skipped"
+                                        : r.error
+                                          ? "Error"
+                                          : "Failed"}
+                                  </p>
+                                  {!r.pass && !r.skipped && !r.error ? (
+                                    <div className="mt-1.5 grid grid-cols-1 gap-1.5 text-[10px] xl:text-[11px]">
+                                      {r.input ? (
+                                        <div>
+                                          <p className="font-medium text-slate-600 mb-0.5">Input</p>
+                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
+                                            {r.input}
+                                          </pre>
+                                        </div>
+                                      ) : null}
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                        <div>
+                                          <p className="font-medium text-slate-600 mb-0.5">
+                                            Expected output
+                                          </p>
+                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-slate-800">
+                                            {r.expected || "(empty)"}
+                                          </pre>
+                                        </div>
+                                        <div>
+                                          <p className="font-medium text-slate-600 mb-0.5">
+                                            Your output
+                                          </p>
+                                          <pre className="bg-white/80 border border-red-100 rounded px-2 py-1 whitespace-pre-wrap font-mono text-red-900">
+                                            {r.actual || "(empty)"}
+                                          </pre>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </div>
                               ))}
                             </div>
                             {codingResults.some((r) => r.error && !r.skipped) ? (

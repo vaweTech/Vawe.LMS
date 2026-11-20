@@ -419,6 +419,8 @@ export default function AdminMockTestCompanyPage() {
   const [editMeta, setEditMeta] = useState(emptyTestForm);
   const [questionEditId, setQuestionEditId] = useState(null);
   const [questionDrafts, setQuestionDrafts] = useState([]);
+  const [passageShareSize, setPassageShareSize] = useState(4);
+  const [passageModalDraftId, setPassageModalDraftId] = useState("");
   const [uploadInfo, setUploadInfo] = useState("");
   const [questionType, setQuestionType] = useState("mcq");
   const [sectionMap, setSectionMap] = useState({});
@@ -550,6 +552,7 @@ export default function AdminMockTestCompanyPage() {
     setSectionTimings({});
     setSubSectionTimings({});
     setUploadInfo("");
+    setPassageModalDraftId("");
   }
 
   function moveSection(sec, direction) {
@@ -922,6 +925,50 @@ export default function AdminMockTestCompanyPage() {
   function updateQuestionDraftById(draftId, patch) {
     setQuestionDrafts((prev) =>
       prev.map((q) => (q.draftId === draftId ? { ...q, ...patch } : q))
+    );
+  }
+
+  function updatePassageText(draftId, text) {
+    setQuestionDrafts((prev) => {
+      const source = prev.find((q) => q.draftId === draftId);
+      const group = String(source?.passageGroup || "").trim();
+      if (!group) {
+        return prev.map((q) => (q.draftId === draftId ? { ...q, description: text } : q));
+      }
+      return prev.map((q) =>
+        String(q?.passageGroup || "").trim() === group ? { ...q, description: text } : q
+      );
+    });
+  }
+
+  function sharePassageWithNext(draftId) {
+    const count = Math.max(2, Math.min(10, Number(passageShareSize) || 4));
+    const visibleIds = filterDraftsByScope(
+      questionDrafts.filter((q) => (q?.type || "mcq") === "mcq"),
+      activeSectionScope,
+      activeMcqSubScope
+    ).map((q) => q.draftId);
+    const start = visibleIds.indexOf(draftId);
+    if (start < 0) return;
+    const targetIds = visibleIds.slice(start, start + count);
+    const source = questionDrafts.find((q) => q.draftId === draftId);
+    const text = String(source?.description || "").trim();
+    if (!text) {
+      alert("Write the passage first, then share it with the next questions.");
+      return;
+    }
+    if (targetIds.length < 2) {
+      alert("Add the next MCQs in this list, then share the passage with them.");
+      return;
+    }
+    const group =
+      String(source?.passageGroup || "").trim() ||
+      `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const idSet = new Set(targetIds);
+    setQuestionDrafts((prev) =>
+      prev.map((q) =>
+        idSet.has(q.draftId) ? { ...q, description: text, passageGroup: group } : q
+      )
     );
   }
 
@@ -2500,6 +2547,33 @@ export default function AdminMockTestCompanyPage() {
                                       companyNames={q.companyNames}
                                       onUpdate={updateQuestionDraftById}
                                     />
+                                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setPassageModalDraftId(q.draftId)}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+                                          String(q.description || "").trim()
+                                            ? "bg-sky-50 border-sky-200 text-[#00448a] hover:bg-sky-100"
+                                            : "bg-white border-gray-200 text-slate-700 hover:bg-slate-50"
+                                        }`}
+                                      >
+                                        Passage / paragraph (optional)
+                                        {String(q.description || "").trim() ? " · Added" : ""}
+                                      </button>
+                                      {String(q.passageGroup || "").trim() ? (
+                                        <span className="text-[11px] text-[#00448a]">
+                                          Shared with{" "}
+                                          {
+                                            questionDrafts.filter(
+                                              (item) =>
+                                                String(item.passageGroup || "").trim() ===
+                                                String(q.passageGroup || "").trim()
+                                            ).length
+                                          }{" "}
+                                          questions
+                                        </span>
+                                      ) : null}
+                                    </div>
                                     <textarea
                                       value={q.question || ""}
                                       onChange={(e) =>
@@ -2753,6 +2827,114 @@ export default function AdminMockTestCompanyPage() {
           )}
         </div>
       </div>
+
+      {passageModalDraftId
+        ? (() => {
+            const modalQ = questionDrafts.find((item) => item.draftId === passageModalDraftId);
+            if (!modalQ) return null;
+            const group = String(modalQ.passageGroup || "").trim();
+            const sharedCount = group
+              ? questionDrafts.filter(
+                  (item) => String(item.passageGroup || "").trim() === group
+                ).length
+              : 0;
+            return (
+              <div className="fixed inset-0 z-[95] flex items-center justify-center p-4 bg-black/50">
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="passage-modal-title"
+                  className="w-full max-w-2xl rounded-2xl border border-sky-100 bg-white shadow-2xl overflow-hidden"
+                >
+                  <div className="bg-sky-50 border-b border-sky-100 px-5 py-4 flex items-start justify-between gap-3">
+                    <div>
+                      <h3
+                        id="passage-modal-title"
+                        className="text-base font-semibold text-[#00448a]"
+                      >
+                        Passage / paragraph (optional)
+                      </h3>
+                      <p className="mt-1 text-xs text-slate-600 leading-relaxed">
+                        For verbal or English questions. Write the passage once, then share it with
+                        the next questions. Each of those questions shows the same passage.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPassageModalDraftId("")}
+                      className="shrink-0 rounded-lg px-2.5 py-1 text-sm text-slate-600 hover:bg-white"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <div className="px-5 py-4 space-y-3">
+                    <textarea
+                      value={modalQ.description || ""}
+                      onChange={(e) => updatePassageText(modalQ.draftId, e.target.value)}
+                      rows={8}
+                      placeholder="Paste the reading passage or paragraph here"
+                      className="w-full border border-sky-200 rounded-xl px-3 py-2.5 text-sm bg-white focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a] outline-none"
+                      autoFocus
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-xs text-slate-700">
+                        Share with next
+                        <input
+                          type="number"
+                          min={2}
+                          max={10}
+                          value={passageShareSize}
+                          onChange={(e) =>
+                            setPassageShareSize(
+                              Math.max(2, Math.min(10, Number(e.target.value) || 2))
+                            )
+                          }
+                          className="w-14 border border-sky-200 rounded-lg px-2 py-1 text-xs bg-white"
+                        />
+                        questions
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          sharePassageWithNext(modalQ.draftId);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-[#00448a] text-white text-xs font-medium hover:bg-[#003a76]"
+                      >
+                        Apply passage
+                      </button>
+                      {sharedCount > 1 ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateQuestionDraftById(modalQ.draftId, { passageGroup: "" })
+                          }
+                          className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-50"
+                        >
+                          Unlink this question
+                        </button>
+                      ) : null}
+                    </div>
+                    {sharedCount > 1 ? (
+                      <p className="text-[11px] font-medium text-[#00448a]">
+                        Shared with {sharedCount} questions. Editing this passage updates all of
+                        them.
+                      </p>
+                    ) : null}
+                    <div className="pt-1 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setPassageModalDraftId("")}
+                        className="px-4 py-2 rounded-xl bg-[#00448a] text-white text-sm font-medium hover:bg-[#003a76]"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()
+        : null}
     </CheckAdminAuth>
   );
 }
