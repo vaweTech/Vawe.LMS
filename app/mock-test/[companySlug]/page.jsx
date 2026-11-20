@@ -9,6 +9,7 @@ import {
   fetchMockTestGroup,
   fetchMockTestsForCompany,
   isMockTestLocked,
+  orderMockSectionsForExam,
   summarizeMockTestQuestions,
 } from "@/lib/mockTests";
 import {
@@ -61,13 +62,15 @@ export default function MockTestCompanyPage() {
   const stats = useMemo(() => {
     return tests.reduce(
       (acc, test) => {
-        const s = summarizeMockTestQuestions(test.questions);
+        const s = summarizeMockTestQuestions(test.questions, test.sectionOrder);
         acc.mcq += s.mcq;
         acc.coding += s.coding;
-        s.sections.forEach((sec) => acc.sections.add(sec));
+        s.sections.forEach((sec) => {
+          if (!acc.sectionList.includes(sec)) acc.sectionList.push(sec);
+        });
         return acc;
       },
-      { mcq: 0, coding: 0, sections: new Set() }
+      { mcq: 0, coding: 0, sectionList: [] }
     );
   }, [tests]);
 
@@ -105,9 +108,10 @@ export default function MockTestCompanyPage() {
                     <CodeBracketIcon className="h-4 w-4" />
                     {stats.coding} Coding
                   </span>
-                  {stats.sections.size > 0 && (
+                  {stats.sectionList.length > 0 && (
                     <span className="inline-flex items-center px-3 py-1 rounded-full bg-white/15 text-sm">
-                      {stats.sections.size} section{stats.sections.size === 1 ? "" : "s"}
+                      {stats.sectionList.length} section
+                      {stats.sectionList.length === 1 ? "" : "s"}
                     </span>
                   )}
                 </div>
@@ -138,7 +142,14 @@ export default function MockTestCompanyPage() {
           ) : (
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden divide-y divide-slate-100">
               {tests.map((test, index) => {
-                const summary = summarizeMockTestQuestions(test.questions);
+                const summary = summarizeMockTestQuestions(
+                  test.questions,
+                  test.sectionOrder
+                );
+                const sectionNames = orderMockSectionsForExam(
+                  test.questions,
+                  test.sectionOrder
+                );
                 const duration = Number(test.durationMinutes) || null;
                 const locked = isMockTestLocked(test, group);
 
@@ -179,7 +190,7 @@ export default function MockTestCompanyPage() {
                               {summary.coding} Coding
                             </span>
                           )}
-                          {summary.sections.slice(0, 4).map((section) => (
+                          {sectionNames.slice(0, 4).map((section) => (
                             <span
                               key={section}
                               className="hidden md:inline-flex px-2 py-0.5 rounded-full bg-[#26ebe5]/15 text-[#00448a] text-[11px] font-medium"
@@ -187,9 +198,9 @@ export default function MockTestCompanyPage() {
                               {section}
                             </span>
                           ))}
-                          {summary.sections.length > 4 && (
+                          {sectionNames.length > 4 && (
                             <span className="hidden md:inline text-[11px] text-gray-400">
-                              +{summary.sections.length - 4}
+                              +{sectionNames.length - 4}
                             </span>
                           )}
                         </div>

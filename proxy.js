@@ -93,12 +93,12 @@ async function fetchAppDisabled(request) {
     const data = await res.json();
     return Boolean(data?.disabled);
   } catch (e) {
-    console.error("middleware app-status check failed:", e);
+    console.error("proxy app-status check failed:", e);
     return false;
   }
 }
 
-export async function middleware(request) {
+export async function proxy(request) {
   const { pathname } = request.nextUrl;
 
   if (isAllowlisted(pathname)) {

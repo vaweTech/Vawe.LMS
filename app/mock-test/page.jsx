@@ -20,7 +20,14 @@ export default function MockTestCompaniesPage() {
         if (!cancelled && res.ok) {
           const groups = await res.json();
           if (Array.isArray(groups)) {
-            setCompanies(groups);
+            const sorted = [...groups].sort((a, b) => {
+              const orderDiff = (Number(a.order) || 0) - (Number(b.order) || 0);
+              if (orderDiff !== 0) return orderDiff;
+              return String(a.label || a.slug || "").localeCompare(
+                String(b.label || b.slug || "")
+              );
+            });
+            setCompanies(sorted);
             return;
           }
         }
@@ -32,7 +39,16 @@ export default function MockTestCompaniesPage() {
           const tests = await fetchMockTestsForCompany(slug);
           if (tests.length) visible.push(g);
         }
-        if (!cancelled) setCompanies(visible);
+        if (!cancelled) {
+          visible.sort((a, b) => {
+            const orderDiff = (Number(a.order) || 0) - (Number(b.order) || 0);
+            if (orderDiff !== 0) return orderDiff;
+            return String(a.label || a.slug || "").localeCompare(
+              String(b.label || b.slug || "")
+            );
+          });
+          setCompanies(visible);
+        }
       } catch (e) {
         console.error(e);
         if (!cancelled) setCompanies([]);

@@ -483,7 +483,10 @@ function TakeMockTestPage() {
     [test]
   );
 
-  const summary = useMemo(() => summarizeMockTestQuestions(questions), [questions]);
+  const summary = useMemo(
+    () => summarizeMockTestQuestions(questions, test?.sectionOrder),
+    [questions, test?.sectionOrder]
+  );
 
   const allQuestionEntries = useMemo(
     () => questions.map((q, index) => ({ q, index })),
@@ -491,13 +494,18 @@ function TakeMockTestPage() {
   );
 
   const allSections = useMemo(
-    () => orderMockSectionsForExam(questions),
-    [questions]
+    () => orderMockSectionsForExam(questions, test?.sectionOrder),
+    [questions, test?.sectionOrder]
   );
 
   const subSectionsInSection = useMemo(
-    () => orderMockSubSectionsForExam(questions, activeSection),
-    [questions, activeSection]
+    () =>
+      orderMockSubSectionsForExam(
+        questions,
+        activeSection,
+        test?.subSectionOrder
+      ),
+    [questions, activeSection, test?.subSectionOrder]
   );
 
   const scopeTiming = useMemo(
@@ -931,7 +939,11 @@ function TakeMockTestPage() {
       }
       const nextSec = allSections[secIdx + 1];
       setActiveSection(nextSec);
-      const subs = orderMockSubSectionsForExam(questions, nextSec);
+      const subs = orderMockSubSectionsForExam(
+        questions,
+        nextSec,
+        test?.subSectionOrder
+      );
       setActiveSubSection(subs[0] || "General");
       return true;
     }
@@ -1014,6 +1026,7 @@ function TakeMockTestPage() {
         activeSubSection,
         sectionTimings: test?.sectionTimings,
         subSectionTimings: test?.subSectionTimings,
+        subSectionOrder: test?.subSectionOrder,
         scopeTimeLeftMs,
       });
     }
@@ -1027,6 +1040,7 @@ function TakeMockTestPage() {
     activeSubSection,
     test?.sectionTimings,
     test?.subSectionTimings,
+    test?.subSectionOrder,
     scopeTimeLeftMs,
     secure.timeLeftMs,
   ]);
@@ -1210,6 +1224,13 @@ function TakeMockTestPage() {
                   : ""}
                 .
               </li>
+              {allSections.length > 0 ? (
+                <li>
+                  Sections (in order):{" "}
+                  <strong>{allSections.join(" → ")}</strong>
+                  .
+                </li>
+              ) : null}
               <li>
                 The total duration of the test is <strong>{timingLabel}</strong>. A countdown timer
                 at the top right of the screen shows the time left
@@ -1548,7 +1569,11 @@ function TakeMockTestPage() {
                       return;
                     }
                     setActiveSection(sec);
-                    const subs = orderMockSubSectionsForExam(questions, sec);
+                    const subs = orderMockSubSectionsForExam(
+                      questions,
+                      sec,
+                      test?.subSectionOrder
+                    );
                     setActiveSubSection(subs[0] || "General");
                   }}
                   className={`flex-1 min-w-[7rem] py-2 xl:py-2.5 px-3 text-xs xl:text-sm font-medium transition whitespace-nowrap ${

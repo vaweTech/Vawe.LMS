@@ -22,7 +22,9 @@ import {
   isMockTestLocked,
   mockSubSectionTimingKey,
   normalizeMockCompanyNames,
+  normalizeMockSectionOrder,
   normalizeMockSectionTimings,
+  normalizeMockSubSectionOrder,
   normalizeMockSubSectionTimings,
   sanitizeMockQuestions,
   sumMockSubSectionTimingsForSection,
@@ -46,6 +48,8 @@ import { parseDayMcqRows } from "@/lib/dayMcqUpload";
 import { ListRowSkeleton, StatsSkeleton } from "@/components/PageSkeleton";
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Code2,
   FileQuestion,
@@ -325,13 +329,32 @@ function scopeTitle(base, sectionScope, subScope) {
 function collectSubSectionsForSection(section, sectionMap, drafts) {
   const sec = String(section || "").trim();
   if (!sec) return [];
-  const set = new Set(Array.isArray(sectionMap[sec]) ? sectionMap[sec] : []);
-  drafts.forEach((q) => {
+  const ordered = [];
+  const seen = new Set();
+  (Array.isArray(sectionMap[sec]) ? sectionMap[sec] : []).forEach((sub) => {
+    const name = String(sub || "").trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    ordered.push(name);
+  });
+  (Array.isArray(drafts) ? drafts : []).forEach((q) => {
     if (String(q.section || "").trim() !== sec) return;
     const sub = getMockQuestionSubSection(q);
-    if (sub) set.add(sub);
+    if (!sub || seen.has(sub)) return;
+    seen.add(sub);
+    ordered.push(sub);
   });
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
+  return ordered;
+}
+
+function moveListItem(list, index, direction) {
+  const next = [...list];
+  const target = index + direction;
+  if (target < 0 || target >= next.length) return list;
+  const tmp = next[index];
+  next[index] = next[target];
+  next[target] = tmp;
+  return next;
 }
 
 function SectionTabs({ scope, setScope, sectionNames, allLabel, showUnassigned = false }) {
@@ -399,6 +422,7 @@ export default function AdminMockTestCompanyPage() {
   const [uploadInfo, setUploadInfo] = useState("");
   const [questionType, setQuestionType] = useState("mcq");
   const [sectionMap, setSectionMap] = useState({});
+  const [sectionOrder, setSectionOrder] = useState([]);
   const [newSectionName, setNewSectionName] = useState("");
   const [newSubSectionName, setNewSubSectionName] = useState("");
   const [newSubSectionParent, setNewSubSectionParent] = useState("");
@@ -428,28 +452,22 @@ export default function AdminMockTestCompanyPage() {
     [questionDrafts]
   );
 
-  const mcqSectionNames = useMemo(() => {
+  const discoveredSectionNames = useMemo(() => {
     const names = new Set(Object.keys(sectionMap || {}));
-    mcqDrafts.forEach((q) => {
+    questionDrafts.forEach((q) => {
       const s = String(q.section || "").trim();
       if (s) names.add(s);
     });
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [sectionMap, mcqDrafts]);
-
-  const codingSectionNames = useMemo(() => {
-    const names = new Set(Object.keys(sectionMap || {}));
-    codingDrafts.forEach((q) => {
-      const s = String(q.section || "").trim();
-      if (s) names.add(s);
-    });
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [sectionMap, codingDrafts]);
+    return Array.from(names);
+  }, [sectionMap, questionDrafts]);
 
   const allSectionNames = useMemo(
-    () => Array.from(new Set([...mcqSectionNames, ...codingSectionNames])).sort((a, b) => a.localeCompare(b)),
-    [mcqSectionNames, codingSectionNames]
+    () => normalizeMockSectionOrder(sectionOrder, discoveredSectionNames),
+    [sectionOrder, discoveredSectionNames]
   );
+
+  const mcqSectionNames = allSectionNames;
+  const codingSectionNames = allSectionNames;
 
   const activeSectionScope = activeMcqScope;
 
@@ -492,6 +510,11 @@ export default function AdminMockTestCompanyPage() {
   }, [activeSectionScope]);
 
   useEffect(() => {
+    if (!discoveredSectionNames.length) return;
+    setSectionOrder((prev) => normalizeMockSectionOrder(prev, discoveredSectionNames));
+  }, [discoveredSectionNames]);
+
+  useEffect(() => {
     if (!hasUnassignedSection && activeSectionScope === SCOPE_UNASSIGNED) {
       setActiveSectionScope(SCOPE_ALL);
     }
@@ -523,9 +546,31 @@ export default function AdminMockTestCompanyPage() {
     setQuestionEditId(null);
     setQuestionDrafts([]);
     setSectionMap({});
+    setSectionOrder([]);
     setSectionTimings({});
     setSubSectionTimings({});
     setUploadInfo("");
+  }
+
+  function moveSection(sec, direction) {
+    setSectionOrder((prev) => {
+      const list = normalizeMockSectionOrder(prev, discoveredSectionNames);
+      const index = list.indexOf(sec);
+      if (index < 0) return list;
+      return moveListItem(list, index, direction);
+    });
+  }
+
+  function moveSubSection(sec, sub, direction) {
+    setSectionMap((prev) => {
+      const current = collectSubSectionsForSection(sec, prev, questionDrafts);
+      const index = current.indexOf(sub);
+      if (index < 0) return prev;
+      return {
+        ...prev,
+        [sec]: moveListItem(current, index, direction),
+      };
+    });
   }
 
   const companyLabel = getMockTestCompanyLabel(companySlug, group ? [group] : undefined);
@@ -841,11 +886,26 @@ export default function AdminMockTestCompanyPage() {
         : [ensureDraftId(createEmptyMockQuestion(), 0)];
       setQuestionDrafts(loaded);
       const map = buildMockSectionMap(loaded);
-      setSectionMap(map);
+      const savedSubOrder = normalizeMockSubSectionOrder(test?.subSectionOrder);
+      const mergedMap = { ...map };
+      Object.entries(savedSubOrder).forEach(([sec, orderedSubs]) => {
+        mergedMap[sec] = normalizeMockSectionOrder(
+          orderedSubs,
+          collectSubSectionsForSection(sec, map, loaded)
+        );
+      });
+      setSectionMap(mergedMap);
+      const knownSecs = Array.from(
+        new Set([
+          ...Object.keys(mergedMap),
+          ...loaded.map((q) => String(q.section || "").trim()).filter(Boolean),
+        ])
+      );
+      setSectionOrder(normalizeMockSectionOrder(test?.sectionOrder, knownSecs));
       const loadedSubs = normalizeMockSubSectionTimings(test?.subSectionTimings);
       const sectionToSubs = {};
-      Object.keys(map || {}).forEach((sec) => {
-        sectionToSubs[sec] = collectSubSectionsForSection(sec, map, loaded);
+      Object.keys(mergedMap || {}).forEach((sec) => {
+        sectionToSubs[sec] = collectSubSectionsForSection(sec, mergedMap, loaded);
       });
       setSubSectionTimings(loadedSubs);
       setSectionTimings(
@@ -922,6 +982,7 @@ export default function AdminMockTestCompanyPage() {
     const n = String(newSectionName || "").trim();
     if (!n) return;
     setSectionMap((prev) => ({ ...prev, [n]: prev[n] || [] }));
+    setSectionOrder((prev) => (prev.includes(n) ? prev : [...prev, n]));
     setNewSectionName("");
     setActiveSectionScope(n);
   }
@@ -995,13 +1056,28 @@ export default function AdminMockTestCompanyPage() {
         cleanedSubs,
         sectionToSubs
       );
+      const knownSecs = Array.from(
+        new Set([
+          ...Object.keys(sectionMap || {}),
+          ...cleaned.map((q) => String(q.section || "").trim()).filter(Boolean),
+        ])
+      );
+      const cleanedSectionOrder = normalizeMockSectionOrder(sectionOrder, knownSecs);
+      const cleanedSubSectionOrder = {};
+      cleanedSectionOrder.forEach((sec) => {
+        const subs = collectSubSectionsForSection(sec, sectionMap, cleaned);
+        if (subs.length) cleanedSubSectionOrder[sec] = subs;
+      });
       await updateMockTest(companySlug, questionEditId, {
         questions: cleaned,
         sectionTimings: cleanedSections,
         subSectionTimings: cleanedSubs,
+        sectionOrder: cleanedSectionOrder,
+        subSectionOrder: normalizeMockSubSectionOrder(cleanedSubSectionOrder),
       });
       setQuestionEditId(null);
       setQuestionDrafts([]);
+      setSectionOrder([]);
       setSectionTimings({});
       setSubSectionTimings({});
       await loadData();
@@ -1803,7 +1879,10 @@ export default function AdminMockTestCompanyPage() {
                   ) : (
                     <div className="divide-y divide-slate-100">
                       {tests.map((test, index) => {
-                        const summary = summarizeMockTestQuestions(test.questions);
+                        const summary = summarizeMockTestQuestions(
+                          test.questions,
+                          test.sectionOrder
+                        );
                         const isEditingMeta = editingTestId === test.id;
                         const testLocked = isMockTestLocked(test, group);
                         const lockedAccounts = lockedAccountsByTest[test.id] || [];
@@ -2169,9 +2248,7 @@ export default function AdminMockTestCompanyPage() {
                                   </button>
                                 </div>
                                 <div className="space-y-3">
-                                  {Array.from(
-                                    new Set([...mcqSectionNames, ...codingSectionNames])
-                                  ).map((sec) => {
+                                  {allSectionNames.map((sec, secIdx) => {
                                     const subs = collectSubSectionsForSection(
                                       sec,
                                       sectionMap,
@@ -2192,9 +2269,31 @@ export default function AdminMockTestCompanyPage() {
                                         className="rounded-lg border border-slate-200 bg-white p-3"
                                       >
                                         <div className="flex flex-wrap items-center gap-3">
-                                          <p className="text-sm font-semibold text-slate-800 min-w-[120px]">
-                                            {sec}
-                                          </p>
+                                          <div className="flex items-center gap-1.5 min-w-[140px]">
+                                            <div className="flex flex-col shrink-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => moveSection(sec, -1)}
+                                                disabled={secIdx === 0}
+                                                className="p-0.5 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                                                title="Move section up"
+                                              >
+                                                <ChevronUp className="h-4 w-4" />
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => moveSection(sec, 1)}
+                                                disabled={secIdx === allSectionNames.length - 1}
+                                                className="p-0.5 rounded text-slate-500 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                                                title="Move section down"
+                                              >
+                                                <ChevronDown className="h-4 w-4" />
+                                              </button>
+                                            </div>
+                                            <p className="text-sm font-semibold text-slate-800">
+                                              {sec}
+                                            </p>
+                                          </div>
                                           <label className="flex items-center gap-2 text-xs text-slate-600">
                                             <span>Minutes</span>
                                             <input
@@ -2233,15 +2332,39 @@ export default function AdminMockTestCompanyPage() {
                                         </div>
                                         {subs.length > 0 ? (
                                           <div className="mt-2 grid sm:grid-cols-2 gap-2 pl-0 sm:pl-2">
-                                            {subs.map((sub) => {
+                                            {subs.map((sub, subIdx) => {
                                               const key = mockSubSectionTimingKey(sec, sub);
                                               return (
-                                                <label
+                                                <div
                                                   key={key}
                                                   className="flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50 px-2.5 py-2 text-xs"
                                                 >
-                                                  <span className="text-slate-700 truncate">{sub}</span>
-                                                  <span className="flex items-center gap-1.5 shrink-0">
+                                                  <div className="flex items-center gap-1.5 min-w-0">
+                                                    <div className="flex flex-col shrink-0">
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => moveSubSection(sec, sub, -1)}
+                                                        disabled={subIdx === 0}
+                                                        className="p-0.5 rounded text-slate-500 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                                        title="Move sub-section up"
+                                                      >
+                                                        <ChevronUp className="h-3.5 w-3.5" />
+                                                      </button>
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => moveSubSection(sec, sub, 1)}
+                                                        disabled={subIdx === subs.length - 1}
+                                                        className="p-0.5 rounded text-slate-500 hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed"
+                                                        title="Move sub-section down"
+                                                      >
+                                                        <ChevronDown className="h-3.5 w-3.5" />
+                                                      </button>
+                                                    </div>
+                                                    <span className="text-slate-700 truncate">
+                                                      {sub}
+                                                    </span>
+                                                  </div>
+                                                  <label className="flex items-center gap-1.5 shrink-0">
                                                     <span className="text-slate-500">min</span>
                                                     <input
                                                       type="number"
@@ -2274,8 +2397,8 @@ export default function AdminMockTestCompanyPage() {
                                                       placeholder="—"
                                                       className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm bg-white"
                                                     />
-                                                  </span>
-                                                </label>
+                                                  </label>
+                                                </div>
                                               );
                                             })}
                                           </div>
