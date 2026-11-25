@@ -1342,7 +1342,7 @@ function TakeMockTestPage() {
       });
       if (!assignment || assignment.allDone) {
         alert("You have completed all tests in this link. Thank you!");
-        router.push(`/mock-test/public/${encodeURIComponent(publicLinkId)}`);
+        router.push(`/m/${encodeURIComponent(publicLinkId)}`);
         return;
       }
       writeMockPublicSession(publicLinkId, {
@@ -1380,7 +1380,7 @@ function TakeMockTestPage() {
           <h1 className="text-xl font-bold text-slate-900 mb-2">Registration required</h1>
           <p className="text-sm text-slate-600 mb-6">{publicGateError}</p>
           <Link
-            href={`/mock-test/public/${encodeURIComponent(publicLinkId)}`}
+            href={`/m/${encodeURIComponent(publicLinkId)}`}
             className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
           >
             Go to registration
@@ -1396,7 +1396,7 @@ function TakeMockTestPage() {
         <div className="min-h-dvh pt-24 px-4 text-center">
           <p className="text-gray-700 mb-4">Mock test not found.</p>
           <Link
-            href={publicMode ? `/mock-test/public/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
+            href={publicMode ? `/m/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
             className="text-[#00448a] hover:underline"
           >
             Back
@@ -1437,7 +1437,7 @@ function TakeMockTestPage() {
               {lockedAccount?.reason || secure.blockReason || "This test is locked for your account after 3 tab switches. Ask an admin to unlock it."}
             </p>
             <Link
-              href={publicMode ? `/mock-test/public/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
+              href={publicMode ? `/m/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
               className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
             >
               Back
@@ -2121,7 +2121,7 @@ function TakeMockTestPage() {
                   <Link
                     href={
                       publicMode
-                        ? `/mock-test/public/${encodeURIComponent(publicLinkId)}`
+                        ? `/m/${encodeURIComponent(publicLinkId)}`
                         : `/mock-test/${companySlug}`
                     }
                     className="inline-block text-sm text-slate-600 hover:text-[#00448a] underline"

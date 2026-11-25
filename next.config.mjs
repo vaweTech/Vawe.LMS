@@ -95,6 +95,16 @@ const baseConfig = {
       },
     ];
   },
+
+  // Short mock-test public links: /m/:linkId → /mock-test/public/:linkId
+  async rewrites() {
+    return [
+      {
+        source: '/m/:linkId',
+        destination: '/mock-test/public/:linkId',
+      },
+    ];
+  },
 };
 
 const nextConfig = baseConfig;
