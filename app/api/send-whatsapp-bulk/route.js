@@ -13,7 +13,10 @@ import {
   buildMockTestScorecardPdfBuffer,
   getMockTestScorecardFileName,
 } from "@/lib/mockTestScorecardPdf";
-import { buildMockResultWhatsAppParams } from "@/lib/mockTestResultWhatsApp";
+import {
+  buildMockResultWhatsAppParams,
+  shouldAttachExamReportPdf,
+} from "@/lib/mockTestResultWhatsApp";
 
 const DEFAULT_CONCURRENCY = Number(process.env.WHATSAPP_BULK_CONCURRENCY || 20);
 
@@ -82,9 +85,16 @@ export async function POST(req) {
           companyLabel: itemCompanyLabel,
         } = item || {};
 
-        let headerDocument = item?.headerDocument || null;
+        const isExamReport = /exam_report/i.test(String(template || ""));
+        const attachPdf = isExamReport
+          ? shouldAttachExamReportPdf()
+          : Boolean(scorecardRow);
+        // Header = None in Meta → never send a document component for exam_report
+        // unless WHATSAPP_EXAM_REPORT_ATTACH_PDF=1 (after Meta Header = Document).
+        let headerDocument =
+          isExamReport && !attachPdf ? null : item?.headerDocument || null;
 
-        if (!headerDocument && scorecardRow) {
+        if (!headerDocument && scorecardRow && attachPdf) {
           try {
             const filename =
               String(documentFilename || "").trim() ||

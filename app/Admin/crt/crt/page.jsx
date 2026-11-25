@@ -35,6 +35,7 @@ export default function CRTManager() {
   const [showCreateCourseForm, setShowCreateCourseForm] = useState(false);
   const [deletingCourseId, setDeletingCourseId] = useState("");
   const [allCrtCourses, setAllCrtCourses] = useState([]);
+  const [courseSearch, setCourseSearch] = useState("");
   const [selectedCourseIds, setSelectedCourseIds] = useState([]);
   const [assigningCourses, setAssigningCourses] = useState(false);
 
@@ -166,6 +167,14 @@ export default function CRTManager() {
     if (!user) return;
     fetchAllCrtCourses();
   }, [user, fetchAllCrtCourses]);
+
+  const filteredAssignCourses = useMemo(() => {
+    const q = courseSearch.trim().toLowerCase();
+    if (!q) return allCrtCourses;
+    return allCrtCourses.filter((c) =>
+      String(c.title || "").toLowerCase().includes(q)
+    );
+  }, [allCrtCourses, courseSearch]);
 
   const fetchCrtStudents = useCallback(async function fetchCrtStudents() {
     try {
@@ -1426,15 +1435,6 @@ export default function CRTManager() {
                   </div>
                   <input
                     type="text"
-                    placeholder="Non-technical label (e.g. Aptitude, Reasoning & Soft Skills)"
-                    value={newCrt.commonLabel}
-                    onChange={(e) =>
-                      setNewCrt((s) => ({ ...s, commonLabel: e.target.value }))
-                    }
-                    className="w-full rounded-md border px-3 py-2"
-                  />
-                  <input
-                    type="text"
                     placeholder="Non-technical courses (comma-separated)"
                     value={newCrt.commonCourses}
                     onChange={(e) =>
@@ -1641,7 +1641,25 @@ export default function CRTManager() {
             Please select a CRT program to assign courses.
           </div>
         ) : null}
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <div className="flex flex-1 min-w-[220px] items-center gap-2">
+            <input
+              type="search"
+              value={courseSearch}
+              onChange={(e) => setCourseSearch(e.target.value)}
+              placeholder="Search courses by title…"
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            />
+            {courseSearch ? (
+              <button
+                type="button"
+                onClick={() => setCourseSearch("")}
+                className="shrink-0 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
           <button
             onClick={assignCoursesToCrt}
             disabled={
@@ -1661,13 +1679,23 @@ export default function CRTManager() {
             Clear Selection  
           </button>
         </div>
+        {courseSearch.trim() && allCrtCourses.length > 0 ? (
+          <p className="mb-3 text-xs text-slate-500">
+            Showing {filteredAssignCourses.length} of {allCrtCourses.length} course
+            {allCrtCourses.length === 1 ? "" : "s"}
+          </p>
+        ) : null}
         {allCrtCourses.length === 0 ? (
           <div className="text-sm text-slate-500">
             No courses created yet. Create a course above.
           </div>
+        ) : filteredAssignCourses.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+            No courses match “{courseSearch.trim()}”.
+          </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {allCrtCourses.map((c) => (
+            {filteredAssignCourses.map((c) => (
               <div
                 key={c.id}
                 className="border rounded-lg p-3 flex flex-col justify-between hover:border-blue-300 hover:shadow-md transition-all cursor-pointer"
@@ -2899,13 +2927,6 @@ export default function CRTManager() {
                     className="w-full rounded-md border px-3 py-2"
                   />
                 </div>
-                <input
-                  type="text"
-                  placeholder="Non-technical label"
-                  value={editCrtForm.commonLabel}
-                  onChange={(e) => setEditCrtForm((s) => ({ ...s, commonLabel: e.target.value }))}
-                  className="w-full rounded-md border px-3 py-2"
-                />
                 <input
                   type="text"
                   placeholder="Non-technical courses (comma-separated)"

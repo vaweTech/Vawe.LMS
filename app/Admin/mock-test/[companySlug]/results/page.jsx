@@ -730,8 +730,8 @@ function ResultsInner() {
 
     const ok = confirm(
       single
-        ? `Send exam_report WhatsApp with scorecard PDF to ${candidateLabel(list[0])}?`
-        : `Send exam_report WhatsApp with scorecard PDF to ${list.length} student${list.length === 1 ? "" : "s"} (current filter)?`
+        ? `Send exam_report WhatsApp to ${candidateLabel(list[0])}?`
+        : `Send exam_report WhatsApp to ${list.length} student${list.length === 1 ? "" : "s"} (current filter)?`
     );
     if (!ok) return;
 
@@ -809,7 +809,6 @@ function ResultsInner() {
       alert(
         [
           `WhatsApp exam_report sent: ${sent}/${recipients.length}`,
-          "Each message includes the student scorecard PDF.",
           failed ? `Failed: ${failed}` : null,
           skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
           skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,

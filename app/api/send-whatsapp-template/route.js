@@ -10,7 +10,10 @@ import {
   buildMockTestScorecardPdfBuffer,
   getMockTestScorecardFileName,
 } from "@/lib/mockTestScorecardPdf";
-import { buildMockResultWhatsAppParams } from "@/lib/mockTestResultWhatsApp";
+import {
+  buildMockResultWhatsAppParams,
+  shouldAttachExamReportPdf,
+} from "@/lib/mockTestResultWhatsApp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,9 +49,14 @@ export async function POST(req) {
     } = body || {};
 
     const languageUsed = resolveWhatsAppTemplateLanguage(template, language);
-    let headerDocument = incomingHeaderDocument || null;
+    const isExamReport = /exam_report/i.test(String(template || ""));
+    const attachPdf = isExamReport
+      ? shouldAttachExamReportPdf()
+      : Boolean(scorecardRow);
+    let headerDocument =
+      isExamReport && !attachPdf ? null : incomingHeaderDocument || null;
 
-    if (!headerDocument && scorecardRow) {
+    if (!headerDocument && scorecardRow && attachPdf) {
       const filename =
         String(documentFilename || "").trim() || getMockTestScorecardFileName(scorecardRow);
       const pdfBuffer = buildMockTestScorecardPdfBuffer(scorecardRow, {

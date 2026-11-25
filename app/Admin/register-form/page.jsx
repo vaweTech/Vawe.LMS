@@ -1,13 +1,29 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { auth, db, firestoreHelpers } from "../../../lib/firebase";
+import { qrCodeImageUrl } from "@/lib/interviewExamPapers";
+
+function registerFormPublicUrl(formId) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}/register?formId=${encodeURIComponent(formId)}`;
+}
+
+function safeFileName(title) {
+  const base = String(title || "register-form")
+    .trim()
+    .replace(/[^\w\-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${base || "register-form"}-qr.png`;
+}
 
 export default function RegisterFormListPage() {
   const router = useRouter();
+  const qrImgRef = useRef(null);
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
@@ -15,6 +31,9 @@ export default function RegisterFormListPage() {
   const [forms, setForms] = useState([]);
   const [formsLoading, setFormsLoading] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
+  const [qrForm, setQrForm] = useState(null);
+  const [qrDownloading, setQrDownloading] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
@@ -89,6 +108,57 @@ export default function RegisterFormListPage() {
       });
     } catch {
       return iso;
+    }
+  }
+
+  async function handleDownloadQr() {
+    if (!qrForm) return;
+    const publicUrl = registerFormPublicUrl(qrForm.id);
+    const filename = safeFileName(qrForm.title);
+    setQrDownloading(true);
+    try {
+      const img = qrImgRef.current;
+      if (img?.complete && img.naturalWidth > 0) {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+        if (blob) {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filename;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          return;
+        }
+      }
+      const res = await fetch(qrCodeImageUrl(publicUrl, 512));
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      console.error(err);
+      window.open(qrCodeImageUrl(publicUrl, 512), "_blank", "noopener,noreferrer");
+    } finally {
+      setQrDownloading(false);
+    }
+  }
+
+  async function handleCopyLink() {
+    if (!qrForm) return;
+    try {
+      await navigator.clipboard.writeText(registerFormPublicUrl(qrForm.id));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (_) {
+      alert("Could not copy the link. Copy it from the text box instead.");
     }
   }
 
@@ -181,6 +251,16 @@ export default function RegisterFormListPage() {
                     >
                       Edit
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopied(false);
+                        setQrForm(form);
+                      }}
+                      className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100"
+                    >
+                      QR code
+                    </button>
                     <a
                       href={`/register?formId=${encodeURIComponent(form.id)}`}
                       target="_blank"
@@ -212,6 +292,78 @@ export default function RegisterFormListPage() {
           </ul>
         )}
       </div>
+
+      {qrForm ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Form QR code</h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  Scan to open <span className="font-medium text-gray-700">{qrForm.title || "Untitled form"}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQrForm(null)}
+                className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100"
+                aria-label="Close"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="mt-5 flex justify-center rounded-xl border border-gray-100 bg-gray-50 p-4">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                ref={qrImgRef}
+                src={qrCodeImageUrl(registerFormPublicUrl(qrForm.id), 280)}
+                alt={`QR code for ${qrForm.title || "registration form"}`}
+                width={280}
+                height={280}
+                crossOrigin="anonymous"
+                className="rounded-lg bg-white"
+              />
+            </div>
+
+            <label className="mt-4 block text-xs font-medium text-gray-600">Public link</label>
+            <div className="mt-1 flex gap-2">
+              <input
+                readOnly
+                value={registerFormPublicUrl(qrForm.id)}
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700"
+              />
+              <button
+                type="button"
+                onClick={handleCopyLink}
+                className="shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setQrForm(null)}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadQr}
+                disabled={qrDownloading}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+              >
+                {qrDownloading ? "Downloading…" : "Download QR"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -18,6 +18,31 @@ function formatDate(iso) {
   }
 }
 
+/** Local calendar day YYYY-MM-DD from a submission timestamp. */
+function submittedDayKey(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function todayDayKey() {
+  return submittedDayKey(new Date().toISOString());
+}
+
+function daysAgoDayKey(days) {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return submittedDayKey(d.toISOString());
+}
+
+function monthStartDayKey() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`;
+}
+
 /** Get display text for an answer given the question (for options we resolve index to label) */
 function answerDisplay(question, value) {
   if (value === undefined || value === null) return "—";
@@ -189,6 +214,8 @@ export default function FormResponsesPage() {
   const [responses, setResponses] = useState([]);
   const [error, setError] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [actioningId, setActioningId] = useState(null);
   const [authExistsByResponseId, setAuthExistsByResponseId] = useState({});
   const [authCheckInFlight, setAuthCheckInFlight] = useState({});
@@ -312,9 +339,96 @@ export default function FormResponsesPage() {
   }, [user, isAdmin, form, responses]);
 
   const filteredResponses = useMemo(() => {
-    if (statusFilter === "all") return responses;
-    return responses.filter((r) => (r.status || "pending") === statusFilter);
-  }, [responses, statusFilter]);
+    return responses.filter((r) => {
+      if (statusFilter !== "all" && (r.status || "pending") !== statusFilter) return false;
+      if (!dateFrom && !dateTo) return true;
+      const day = submittedDayKey(r.submittedAt);
+      if (!day) return false;
+      if (dateFrom && day < dateFrom) return false;
+      if (dateTo && day > dateTo) return false;
+      return true;
+    });
+  }, [responses, statusFilter, dateFrom, dateTo]);
+
+  const hasDateFilter = Boolean(dateFrom || dateTo);
+
+  function clearDateFilter() {
+    setDateFrom("");
+    setDateTo("");
+  }
+
+  function setDatePreset(preset) {
+    const today = todayDayKey();
+    if (preset === "today") {
+      setDateFrom(today);
+      setDateTo(today);
+      return;
+    }
+    if (preset === "7d") {
+      setDateFrom(daysAgoDayKey(6));
+      setDateTo(today);
+      return;
+    }
+    if (preset === "month") {
+      setDateFrom(monthStartDayKey());
+      setDateTo(today);
+    }
+  }
+
+  const dateFilterControls = (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="block">
+        <span className="mb-1 block text-xs font-medium text-gray-600">From</span>
+        <input
+          type="date"
+          value={dateFrom}
+          max={dateTo || undefined}
+          onChange={(e) => setDateFrom(e.target.value)}
+          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800"
+        />
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-xs font-medium text-gray-600">To</span>
+        <input
+          type="date"
+          value={dateTo}
+          min={dateFrom || undefined}
+          onChange={(e) => setDateTo(e.target.value)}
+          className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-800"
+        />
+      </label>
+      <button
+        type="button"
+        onClick={() => setDatePreset("today")}
+        className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        Today
+      </button>
+      <button
+        type="button"
+        onClick={() => setDatePreset("7d")}
+        className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        Last 7 days
+      </button>
+      <button
+        type="button"
+        onClick={() => setDatePreset("month")}
+        className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        This month
+      </button>
+      {hasDateFilter ? (
+        <button
+          type="button"
+          onClick={clearDateFilter}
+          className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50"
+        >
+          Clear dates
+        </button>
+      ) : null}
+    </div>
+  );
 
   function logout() {
     signOut(auth);
@@ -499,13 +613,20 @@ export default function FormResponsesPage() {
               <p className="mt-2 text-sm text-slate-600">{form.description}</p>
             ) : null}
             <p className="mt-4 text-sm font-medium text-indigo-700">
-              {responses.length} total response{responses.length === 1 ? "" : "s"}
+              {filteredResponses.length} of {responses.length} response
+              {responses.length === 1 ? "" : "s"}
+              {hasDateFilter ? " (date filtered)" : ""}
             </p>
+            <div className="mt-4">{dateFilterControls}</div>
           </motion.div>
 
           {responses.length === 0 ? (
             <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center text-slate-500">
               No feedback submissions yet.
+            </div>
+          ) : filteredResponses.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center text-slate-500">
+              No feedback submissions match the selected date filter.
             </div>
           ) : (
             <>
@@ -513,9 +634,9 @@ export default function FormResponsesPage() {
               <div className="mb-10 space-y-5">
                 {questions.map((q, qIndex) => {
                   const isChoice = ["multiple", "checkbox", "dropdown"].includes(q.type);
-                  const stats = isChoice ? computeChoiceStats(q, responses) : null;
+                  const stats = isChoice ? computeChoiceStats(q, filteredResponses) : null;
                   const textAnswers = !isChoice
-                    ? responses
+                    ? filteredResponses
                         .map((r) => ({
                           id: r.id,
                           text: answerDisplay(q, r.answers?.[q.id]),
@@ -565,7 +686,7 @@ export default function FormResponsesPage() {
                             </p>
                             <p className="text-sm font-bold text-indigo-900">{stats.top.label}</p>
                             <p className="text-xs text-indigo-700">
-                              {stats.top.percent}% ({stats.top.count} of {stats.answered || responses.length})
+                              {stats.top.percent}% ({stats.top.count} of {stats.answered || filteredResponses.length})
                             </p>
                             {stats.numericAvg != null ? (
                               <p className="mt-1 text-xs font-medium text-indigo-800">
@@ -629,7 +750,7 @@ export default function FormResponsesPage() {
 
               <h2 className="mb-4 text-lg font-semibold text-slate-900">All responses</h2>
               <div className="space-y-4">
-                {responses.map((res, resIndex) => (
+                {filteredResponses.map((res, resIndex) => (
                   <motion.div
                     key={res.id}
                     className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
@@ -640,7 +761,7 @@ export default function FormResponsesPage() {
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
                       <div>
                         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                          Response #{responses.length - resIndex}
+                          Response #{filteredResponses.length - resIndex}
                         </p>
                         <p className="text-sm text-slate-700">{formatDate(res.submittedAt)}</p>
                       </div>
@@ -715,32 +836,41 @@ export default function FormResponsesPage() {
 
       <div className="mx-auto max-w-6xl px-4 py-8">
         <h1 className="mb-2 text-xl font-semibold text-gray-900">{form.title || "Untitled form"}</h1>
-        <div className="mb-6 flex flex-wrap items-center gap-4">
-          <p className="text-sm text-gray-500">
-            {filteredResponses.length} of {responses.length} submission(s)
-          </p>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-600">Filter:</span>
-            {STATUS_FILTERS.map((f) => (
-              <button
-                key={f.value}
-                type="button"
-                onClick={() => setStatusFilter(f.value)}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
-                  statusFilter === f.value
-                    ? "bg-indigo-600 text-white"
-                    : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-50"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
+        <div className="mb-6 space-y-3">
+          <div className="flex flex-wrap items-center gap-4">
+            <p className="text-sm text-gray-500">
+              {filteredResponses.length} of {responses.length} submission(s)
+              {hasDateFilter ? " · date filtered" : ""}
+            </p>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-600">Status:</span>
+              {STATUS_FILTERS.map((f) => (
+                <button
+                  key={f.value}
+                  type="button"
+                  onClick={() => setStatusFilter(f.value)}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                    statusFilter === f.value
+                      ? "bg-indigo-600 text-white"
+                      : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-50"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-gray-600">Date:</span>
+            {dateFilterControls}
           </div>
         </div>
 
         {filteredResponses.length === 0 ? (
           <div className="rounded-xl border border-gray-200 bg-white p-12 text-center text-gray-500">
-            {responses.length === 0 ? "No submissions yet." : "No submissions match the selected filter."}
+            {responses.length === 0
+              ? "No submissions yet."
+              : "No submissions match the selected status / date filter."}
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">

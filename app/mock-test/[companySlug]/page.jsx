@@ -178,6 +178,11 @@ export default function MockTestCompanyPage() {
                               Locked
                             </span>
                           ) : null}
+                          {summary.total > 0 && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 text-[11px] font-medium">
+                              {summary.total} Questions
+                            </span>
+                          )}
                           {summary.mcq > 0 && (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 text-[11px] font-medium">
                               <DocumentTextIcon className="h-3.5 w-3.5" />

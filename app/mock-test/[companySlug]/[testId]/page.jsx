@@ -1460,6 +1460,14 @@ function TakeMockTestPage() {
     const subTimingMap = normalizeMockSubSectionTimings(test?.subSectionTimings);
     const timingTableRows = [];
     let totalTimedMinutes = 0;
+    const countQuestions = (sec, sub = null) =>
+      questions.filter((q) => {
+        const qSec = String(q?.section || "").trim() || "General";
+        if (qSec !== sec) return false;
+        if (sub == null) return true;
+        return (getMockQuestionSubSection(q) || "General") === sub;
+      }).length;
+
     allSections.forEach((sec) => {
       const subs = orderMockSubSectionsForExam(questions, sec, test?.subSectionOrder);
       const sectionMins = getMockFullSectionMinutes(
@@ -1478,6 +1486,7 @@ function TakeMockTestPage() {
             section: sec,
             subSection: formatMockSubSectionLabel(questions, sec, sub),
             minutes: mins,
+            questionCount: countQuestions(sec, sub),
             kind: "subsection",
           });
         });
@@ -1489,6 +1498,7 @@ function TakeMockTestPage() {
           section: sec,
           subSection: "—",
           minutes: mins,
+          questionCount: countQuestions(sec),
           kind: "section",
         });
       }
@@ -1693,15 +1703,21 @@ function TakeMockTestPage() {
                         : durationMinutes
                           ? `Overall test duration: ${durationMinutes} minutes.`
                           : "No section timers configured — overall test time applies if set."}
+                      {" · "}
+                      Total questions: {totalQuestions}
+                      {summary.mcq || summary.coding
+                        ? ` (MCQ ${summary.mcq}, Coding ${summary.coding})`
+                        : ""}
                     </p>
                   </div>
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[520px] text-sm">
+                    <table className="w-full min-w-[560px] text-sm">
                       <thead>
                         <tr className="bg-white text-left text-slate-600 border-b border-slate-200">
                           <th className="px-4 py-3 font-semibold w-12">#</th>
                           <th className="px-4 py-3 font-semibold">Section</th>
                           <th className="px-4 py-3 font-semibold">Sub-section</th>
+                          <th className="px-4 py-3 font-semibold text-right">Questions</th>
                           <th className="px-4 py-3 font-semibold text-right">Time (min)</th>
                         </tr>
                       </thead>
@@ -1718,6 +1734,11 @@ function TakeMockTestPage() {
                               </td>
                               <td className="px-4 py-2.5 text-slate-700">{row.subSection}</td>
                               <td className="px-4 py-2.5 text-right">
+                                <span className="inline-flex min-w-[3rem] justify-end rounded-lg bg-emerald-50 px-2.5 py-1 text-sm font-semibold tabular-nums text-emerald-800">
+                                  {row.questionCount}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2.5 text-right">
                                 <span className="inline-flex min-w-[3rem] justify-end rounded-lg bg-[#00448a]/10 px-2.5 py-1 text-sm font-semibold tabular-nums text-[#00448a]">
                                   {row.minutes > 0 ? row.minutes : "—"}
                                 </span>
@@ -1726,7 +1747,7 @@ function TakeMockTestPage() {
                           ))
                         ) : (
                           <tr>
-                            <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                            <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
                               No sections found for this test.
                             </td>
                           </tr>
@@ -1737,7 +1758,12 @@ function TakeMockTestPage() {
                           <tr className="border-t-2 border-slate-200 bg-[#00448a]/5">
                             <td className="px-4 py-3" colSpan={3}>
                               <span className="text-sm font-semibold text-slate-900">
-                                Total timed duration
+                                Total
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <span className="inline-flex rounded-lg bg-emerald-600 px-3 py-1 text-sm font-bold tabular-nums text-white">
+                                {totalQuestions} Q
                               </span>
                             </td>
                             <td className="px-4 py-3 text-right">
