@@ -52,6 +52,13 @@ import {
   writeMockPublicSession,
 } from "@/lib/mockTestPublicLinks";
 import { formatExamTime, useNoCopy, useSecureExamSession } from "@/lib/useSecureExamSession";
+import {
+  buildMockTestProgressSnapshot,
+  clearMockTestProgress,
+  pickResumeProgress,
+  readMockTestProgress,
+  saveMockTestProgress,
+} from "@/lib/mockTestProgress";
 import { ExamPageSkeleton } from "@/components/PageSkeleton";
 import { downloadMockTestScorecardPdf } from "@/lib/mockTestScorecardPdf";
 
@@ -340,12 +347,19 @@ function TakeMockTestPage() {
   const [embedInstituteSite, setEmbedInstituteSite] = useState(false);
   const [instituteCountdown, setInstituteCountdown] = useState(null);
   const [pdfDownloading, setPdfDownloading] = useState(false);
+  const [authUid, setAuthUid] = useState("");
+  const [resumeProgress, setResumeProgress] = useState(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
   const didInitPart = useRef(false);
   const onScopeTimeUpRef = useRef(null);
   const advancingScopeRef = useRef(false);
   const countdownTimerRef = useRef(null);
   const instituteTimerRef = useRef(null);
   const instituteCountdownRef = useRef(null);
+  const latestProgressRef = useRef(null);
+  const resumeScopeLeftRef = useRef(null);
+  const skipScopeQuestionResetRef = useRef(false);
+  const progressHydratedRef = useRef(false);
 
   useEffect(() => {
     if (!publicMode) {
@@ -371,6 +385,9 @@ function TakeMockTestPage() {
   const companyLabel = groupLabel || String(companySlug || "").replace(/_/g, " ");
   const timingEnabled = useMemo(() => hasMockSectionBasedTiming(test), [test]);
   const durationMinutes = timingEnabled ? 0 : Number(test?.durationMinutes) || 0;
+  const candidateId = publicMode
+    ? normalizeMockPublicPhone(publicSession?.phone)
+    : String(authUid || "").trim();
 
   const loadStudentProfile = useCallback(async (user) => {
     let name = user?.displayName || "";
@@ -399,6 +416,18 @@ function TakeMockTestPage() {
   const persistAccountLock = useCallback(
     async ({ reason, count }) => {
       if (!companySlug || !testId) return;
+      const progress =
+        latestProgressRef.current ||
+        buildMockTestProgressSnapshot({
+          companySlug,
+          testId,
+          candidateId,
+          tabSwitchCount: count,
+        });
+      if (candidateId) {
+        saveMockTestProgress(companySlug, testId, candidateId, progress);
+        setResumeProgress(progress);
+      }
       try {
         if (publicMode && publicSession?.phone) {
           const userId = normalizeMockPublicPhone(publicSession.phone);
@@ -408,6 +437,7 @@ function TakeMockTestPage() {
             email: "",
             reason,
             tabSwitchCount: count,
+            progress,
           });
           setLockedAccount({
             userId,
@@ -416,6 +446,7 @@ function TakeMockTestPage() {
             blocked: true,
             reason,
             tabSwitchCount: count,
+            progress,
           });
           return;
         }
@@ -428,6 +459,7 @@ function TakeMockTestPage() {
           email,
           reason,
           tabSwitchCount: count,
+          progress,
         });
         setLockedAccount({
           userId: user.uid,
@@ -436,12 +468,13 @@ function TakeMockTestPage() {
           blocked: true,
           reason,
           tabSwitchCount: count,
+          progress,
         });
       } catch (e) {
         console.error("Failed to lock mock test account:", e);
       }
     },
-    [companySlug, testId, loadStudentProfile, publicMode, publicSession]
+    [companySlug, testId, loadStudentProfile, publicMode, publicSession, candidateId]
   );
 
   const secure = useSecureExamSession({
@@ -456,6 +489,7 @@ function TakeMockTestPage() {
     setOnTimeUp,
     suppressViolations,
     clearTabWarningOverlay,
+    clearBlock,
   } = secure;
 
   const showStayOnPageNotice = useCallback(
@@ -520,23 +554,78 @@ function TakeMockTestPage() {
     return () => cancelAnimationFrame(id);
   }, [secure.started]);
 
-  async function beginStartCountdown() {
-    if (startingExam || startCountdown != null) return;
+  function applyResumeProgress(progress) {
+    if (!progress || typeof progress !== "object") return;
+    skipScopeQuestionResetRef.current = true;
+    if (progress.answers && typeof progress.answers === "object") {
+      setAnswers(progress.answers);
+    }
+    if (progress.visited && typeof progress.visited === "object") {
+      setVisited(progress.visited);
+    }
+    if (progress.reviewMap && typeof progress.reviewMap === "object") {
+      setReviewMap(progress.reviewMap);
+    }
+    if (progress.codeLanguages && typeof progress.codeLanguages === "object") {
+      setCodeLanguages(progress.codeLanguages);
+    }
+    if (progress.questionShuffleRank && typeof progress.questionShuffleRank === "object") {
+      setQuestionShuffleRank(progress.questionShuffleRank);
+    }
+    if (progress.activeSection) setActiveSection(progress.activeSection);
+    if (progress.activeSubSection) setActiveSubSection(progress.activeSubSection);
+    if (progress.activeIndex != null) setActiveIndex(Number(progress.activeIndex) || 0);
+    if (progress.scopeTimeLeftMs != null) {
+      resumeScopeLeftRef.current = {
+        key: String(progress.scopeKey || ""),
+        ms: Math.max(0, Number(progress.scopeTimeLeftMs) || 0),
+      };
+    }
+    setInstructionsStep(2);
+    secure.setAcceptedRules(true);
+  }
+
+  async function beginStartCountdown({ resume = false } = {}) {
+    if (startingExam || startCountdown != null || resumeBusy) return;
     setStartingExam(true);
     try {
-      const lockId = publicMode
+      const lockId = candidateId || (publicMode
         ? normalizeMockPublicPhone(publicSession?.phone)
-        : auth?.currentUser?.uid;
+        : auth?.currentUser?.uid);
       if (lockId) {
         const block = await fetchMockTestAccountBlock(companySlug, testId, lockId);
         if (isMockTestAccountBlocked(block)) {
+          const progress = pickResumeProgress(
+            readMockTestProgress(companySlug, testId, lockId),
+            block
+          );
+          if (progress) {
+            saveMockTestProgress(companySlug, testId, lockId, progress);
+            setResumeProgress(progress);
+          }
           setLockedAccount(block);
           setStartingExam(false);
           return;
         }
+        const progress = pickResumeProgress(
+          resumeProgress || readMockTestProgress(companySlug, testId, lockId),
+          block
+        );
+        if (progress) setResumeProgress(progress);
+        setLockedAccount(null);
+        clearBlock();
       }
     } catch (e) {
       console.error("Failed to check mock test account lock:", e);
+    }
+
+    const progressForResume =
+      resume &&
+      (resumeProgress ||
+        (candidateId ? readMockTestProgress(companySlug, testId, candidateId) : null));
+
+    if (progressForResume) {
+      applyResumeProgress(progressForResume);
     }
 
     const clearCountdownTimer = () => {
@@ -566,7 +655,16 @@ function TakeMockTestPage() {
       setStartCountdown("Go");
       await wait(700);
 
-      const ok = await secure.startExam();
+      const ok = await secure.startExam(
+        progressForResume
+          ? {
+              resumeFrom: {
+                timeLeftMs: progressForResume.timeLeftMs,
+                tabSwitchCount: progressForResume.tabSwitchCount,
+              },
+            }
+          : undefined
+      );
       if (!ok) {
         setStartCountdown(null);
         setStartingExam(false);
@@ -576,10 +674,12 @@ function TakeMockTestPage() {
       await wait(350);
       setStartCountdown(null);
       setStartingExam(false);
+      setResumeBusy(false);
     } catch (e) {
       console.error("Failed to start exam countdown:", e);
       setStartCountdown(null);
       setStartingExam(false);
+      setResumeBusy(false);
     }
   }
 
@@ -683,6 +783,10 @@ function TakeMockTestPage() {
   }, [subSectionsInSection, activeSubSection]);
 
   useEffect(() => {
+    if (skipScopeQuestionResetRef.current) {
+      skipScopeQuestionResetRef.current = false;
+      return;
+    }
     if (sectionQuestions.length) {
       setActiveIndex(sectionQuestions[0].index);
       setVisited((v) => ({ ...v, [sectionQuestions[0].index]: true }));
@@ -720,6 +824,10 @@ function TakeMockTestPage() {
   }, [questions, isAnswered]);
 
   const finalizeSubmit = useCallback(async () => {
+    if (candidateId) {
+      clearMockTestProgress(companySlug, testId, candidateId);
+      setResumeProgress(null);
+    }
     let mcqCorrect = 0;
     let mcqTotal = 0;
     let codingScore = 0;
@@ -936,7 +1044,104 @@ function TakeMockTestPage() {
     publicMode,
     publicSession,
     publicLinkId,
+    candidateId,
   ]);
+
+  // Keep a live progress snapshot for lock / periodic save.
+  useEffect(() => {
+    if (!companySlug || !testId || !candidateId) {
+      latestProgressRef.current = null;
+      return;
+    }
+    latestProgressRef.current = buildMockTestProgressSnapshot({
+      companySlug,
+      testId,
+      candidateId,
+      answers,
+      visited,
+      reviewMap,
+      codeLanguages,
+      activeSection,
+      activeSubSection,
+      activeIndex,
+      questionShuffleRank,
+      tabSwitchCount: secure.tabSwitchCount,
+      timeLeftMs: secure.timeLeftMs,
+      scopeTimeLeftMs,
+      scopeKey: scopeTiming.key,
+      instructionsStep,
+    });
+  }, [
+    companySlug,
+    testId,
+    candidateId,
+    answers,
+    visited,
+    reviewMap,
+    codeLanguages,
+    activeSection,
+    activeSubSection,
+    activeIndex,
+    questionShuffleRank,
+    secure.tabSwitchCount,
+    secure.timeLeftMs,
+    scopeTimeLeftMs,
+    scopeTiming.key,
+    instructionsStep,
+  ]);
+
+  // Autosave while the exam is running so refresh / lock can resume.
+  useEffect(() => {
+    if (!secure.started || submitted || !candidateId) return undefined;
+    const tick = () => {
+      const snap = latestProgressRef.current;
+      if (!snap) return;
+      saveMockTestProgress(companySlug, testId, candidateId, snap);
+      setResumeProgress(snap);
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => clearInterval(id);
+  }, [secure.started, submitted, candidateId, companySlug, testId]);
+
+  // Load resume snapshot when candidate identity is known.
+  useEffect(() => {
+    if (!companySlug || !testId || !candidateId || submitted) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const local = readMockTestProgress(companySlug, testId, candidateId);
+        const block = await fetchMockTestAccountBlock(companySlug, testId, candidateId);
+        if (cancelled) return;
+        const progress = pickResumeProgress(local, block);
+        if (progress) {
+          setResumeProgress(progress);
+          if (!progressHydratedRef.current && !secure.started) {
+            // Keep shuffle / answers ready for resume without starting yet.
+            if (progress.questionShuffleRank) {
+              setQuestionShuffleRank(progress.questionShuffleRank);
+            }
+            if (progress.answers) setAnswers(progress.answers);
+            if (progress.visited) setVisited(progress.visited);
+            if (progress.reviewMap) setReviewMap(progress.reviewMap);
+            if (progress.codeLanguages) setCodeLanguages(progress.codeLanguages);
+            progressHydratedRef.current = true;
+          }
+        }
+        if (isMockTestAccountBlocked(block)) {
+          setLockedAccount(block);
+        } else if (block && block.blocked === false) {
+          setLockedAccount(null);
+          clearBlock();
+        }
+      } catch (e) {
+        console.error("Failed to load mock test resume progress:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companySlug, testId, candidateId, submitted, clearBlock, secure.started]);
 
   useEffect(() => {
     setOnTimeUp(() => {
@@ -1052,10 +1257,34 @@ function TakeMockTestPage() {
               if (q.starterCode) initialAnswers[idx] = q.starterCode;
             }
           });
-          // Jumble questions for this attempt. A shared passage stays with its set.
-          setQuestionShuffleRank(buildMockQuestionShuffleRanks(qList));
-          setCodeLanguages(langs);
-          setAnswers(initialAnswers);
+          // Prefer saved attempt progress (resume after lock) over a fresh jumble.
+          const saved =
+            (typeof window !== "undefined" &&
+              (readMockTestProgress(
+                companySlug,
+                testId,
+                normalizeMockPublicPhone(publicSession?.phone)
+              ) ||
+                readMockTestProgress(
+                  companySlug,
+                  testId,
+                  String(auth?.currentUser?.uid || "").trim()
+                ))) ||
+            null;
+          if (saved?.questionShuffleRank && Object.keys(saved.questionShuffleRank).length) {
+            setQuestionShuffleRank(saved.questionShuffleRank);
+            setCodeLanguages({ ...langs, ...(saved.codeLanguages || {}) });
+            setAnswers({ ...initialAnswers, ...(saved.answers || {}) });
+            if (saved.visited) setVisited(saved.visited);
+            if (saved.reviewMap) setReviewMap(saved.reviewMap);
+            setResumeProgress(saved);
+            progressHydratedRef.current = true;
+          } else {
+            // Jumble questions for this attempt. A shared passage stays with its set.
+            setQuestionShuffleRank(buildMockQuestionShuffleRanks(qList));
+            setCodeLanguages(langs);
+            setAnswers(initialAnswers);
+          }
         }
       } catch (e) {
         console.error("Failed to load mock test:", e);
@@ -1067,7 +1296,7 @@ function TakeMockTestPage() {
     return () => {
       cancelled = true;
     };
-  }, [companySlug, testId]);
+  }, [companySlug, testId, publicSession?.phone]);
 
   useEffect(() => {
     if (!companySlug || !testId) return undefined;
@@ -1082,8 +1311,17 @@ function TakeMockTestPage() {
         }
         try {
           const block = await fetchMockTestAccountBlock(companySlug, testId, phone);
-          if (!cancelled) {
-            setLockedAccount(isMockTestAccountBlocked(block) ? block : null);
+          if (cancelled) return;
+          const progress = pickResumeProgress(
+            readMockTestProgress(companySlug, testId, phone),
+            block
+          );
+          if (progress) setResumeProgress(progress);
+          if (isMockTestAccountBlocked(block)) {
+            setLockedAccount(block);
+          } else {
+            setLockedAccount(null);
+            clearBlock();
           }
         } catch (e) {
           console.error("Failed to load public mock test account lock:", e);
@@ -1097,18 +1335,35 @@ function TakeMockTestPage() {
     if (!auth) return undefined;
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user?.uid) {
+        setAuthUid("");
         setLockedAccount(null);
         return;
       }
+      setAuthUid(user.uid);
       try {
         const block = await fetchMockTestAccountBlock(companySlug, testId, user.uid);
-        setLockedAccount(isMockTestAccountBlocked(block) ? block : null);
+        if (isMockTestAccountBlocked(block)) {
+          setLockedAccount(block);
+          const progress = pickResumeProgress(
+            readMockTestProgress(companySlug, testId, user.uid),
+            block
+          );
+          if (progress) setResumeProgress(progress);
+        } else {
+          setLockedAccount(null);
+          clearBlock();
+          const progress = pickResumeProgress(
+            readMockTestProgress(companySlug, testId, user.uid),
+            block
+          );
+          if (progress) setResumeProgress(progress);
+        }
       } catch (e) {
         console.error("Failed to load mock test account lock:", e);
       }
     });
     return () => unsub();
-  }, [companySlug, testId, publicMode, publicSession?.phone]);
+  }, [companySlug, testId, publicMode, publicSession?.phone, clearBlock]);
 
   function goToQuestion(globalIdx) {
     setActiveIndex(globalIdx);
@@ -1261,7 +1516,16 @@ function TakeMockTestPage() {
       return undefined;
     }
 
-    let left = minutes * 60 * 1000;
+    const resumeScope = resumeScopeLeftRef.current;
+    const canResumeScope =
+      resumeScope &&
+      Number.isFinite(resumeScope.ms) &&
+      (!resumeScope.key || resumeScope.key === scopeTiming.key);
+    let left = canResumeScope
+      ? Math.max(0, Number(resumeScope.ms) || 0)
+      : minutes * 60 * 1000;
+    if (canResumeScope) resumeScopeLeftRef.current = null;
+
     setScopeTimeLeftMs(left);
     const timerId = setInterval(() => {
       left = Math.max(0, left - 1000);
@@ -1428,20 +1692,75 @@ function TakeMockTestPage() {
   }
 
   if (secure.isBlocked || lockedAccount) {
+    const hasSavedProgress = Boolean(
+      resumeProgress ||
+        lockedAccount?.progress ||
+        (candidateId && readMockTestProgress(companySlug, testId, candidateId))
+    );
     return (
       <AuthGate publicMode={publicMode}>
         <div className="min-h-dvh flex items-center justify-center bg-red-50 px-4">
           <div className="max-w-md w-full bg-white rounded-2xl border border-red-200 p-8 text-center">
             <h1 className="text-xl font-bold text-red-900 mb-2">Account locked for this test</h1>
-            <p className="text-sm text-red-700 mb-6">
-              {lockedAccount?.reason || secure.blockReason || "This test is locked for your account after 3 tab switches. Ask an admin to unlock it."}
+            <p className="text-sm text-red-700 mb-3">
+              {lockedAccount?.reason ||
+                secure.blockReason ||
+                "This test is locked for your account after 3 tab switches. Ask an admin to unlock it."}
             </p>
-            <Link
-              href={publicMode ? `/m/${encodeURIComponent(publicLinkId)}` : `/mock-test/${companySlug}`}
-              className="inline-block px-5 py-2.5 rounded-lg bg-[#00448a] text-white"
-            >
-              Back
-            </Link>
+            <p className="text-sm text-slate-600 mb-6">
+              {hasSavedProgress
+                ? "Your answers are saved. After an admin unlocks you, use Resume test to continue from where you left off — you will not start from the beginning."
+                : "Ask an admin to unlock your account, then open this test again."}
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2 justify-center">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!candidateId) return;
+                  setResumeBusy(true);
+                  try {
+                    const block = await fetchMockTestAccountBlock(
+                      companySlug,
+                      testId,
+                      candidateId
+                    );
+                    const progress = pickResumeProgress(
+                      readMockTestProgress(companySlug, testId, candidateId),
+                      block
+                    );
+                    if (progress) setResumeProgress(progress);
+                    if (isMockTestAccountBlocked(block)) {
+                      setLockedAccount(block);
+                      alert("Still locked. Ask an admin to unlock this account first.");
+                      return;
+                    }
+                    setLockedAccount(null);
+                    clearBlock();
+                    if (progress) {
+                      await beginStartCountdown({ resume: true });
+                    }
+                  } catch (e) {
+                    alert(e?.message || "Could not check unlock status.");
+                  } finally {
+                    setResumeBusy(false);
+                  }
+                }}
+                disabled={resumeBusy || startingExam}
+                className="inline-flex justify-center px-5 py-2.5 rounded-lg bg-[#00448a] text-white disabled:opacity-60"
+              >
+                {resumeBusy || startingExam ? "Checking…" : "Check unlock & resume"}
+              </button>
+              <Link
+                href={
+                  publicMode
+                    ? `/m/${encodeURIComponent(publicLinkId)}`
+                    : `/mock-test/${companySlug}`
+                }
+                className="inline-flex justify-center px-5 py-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
+              >
+                Back
+              </Link>
+            </div>
           </div>
         </div>
       </AuthGate>
@@ -1668,8 +1987,9 @@ function TakeMockTestPage() {
                     required questions.
                   </li>
                   <li>
-                    Do not refresh or close the browser during the test. Progress may be lost if you
-                    leave without submitting.
+                    If the test is locked after 3 tab switches, your answers are saved. After an
+                    admin unlocks you, choose <strong>Resume Test</strong> to continue from the same
+                    place — not from the start.
                   </li>
                   <li>
                     For coding questions, select the language, write your solution, and use{" "}
@@ -1818,7 +2138,9 @@ function TakeMockTestPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={beginStartCountdown}
+                      onClick={() =>
+                        beginStartCountdown({ resume: Boolean(resumeProgress) })
+                      }
                       disabled={
                         !secure.acceptedRules ||
                         startingExam ||
@@ -1827,7 +2149,13 @@ function TakeMockTestPage() {
                       }
                       className="min-w-[160px] px-8 py-3 rounded bg-[#003366] hover:bg-[#00264d] text-white text-base font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
                     >
-                      {startingExam || startCountdown != null ? "Starting…" : "Start Test"}
+                      {startingExam || startCountdown != null
+                        ? resumeProgress
+                          ? "Resuming…"
+                          : "Starting…"
+                        : resumeProgress
+                          ? "Resume Test"
+                          : "Start Test"}
                     </button>
                   </div>
                 </div>

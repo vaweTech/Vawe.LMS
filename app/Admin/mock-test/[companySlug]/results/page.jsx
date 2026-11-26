@@ -803,16 +803,22 @@ function ResultsInner() {
 
       const sent = Number(data.sent || 0);
       const failed = Number(data.failed || 0);
-      const firstError = Array.isArray(data.errors) && data.errors[0]?.error
-        ? `\nFirst error: ${data.errors[0].error}`
+      const firstErrObj = Array.isArray(data.errors) && data.errors[0] ? data.errors[0] : null;
+      const firstError = firstErrObj?.error ? `\nFirst error: ${firstErrObj.error}` : "";
+      const isMissingTemplate =
+        Number(firstErrObj?.errorCode) === 132001 ||
+        /template name does not exist/i.test(String(firstErrObj?.error || ""));
+      const templateHint = isMissingTemplate
+        ? `\n\nFix in Meta WhatsApp Manager:\n1) Open Message templates for this WABA\n2) Create/approve template named "${MOCK_RESULT_WA_TEMPLATE}" (or set WHATSAPP_MOCK_EXAM_REPORT_TEMPLATE_NAME to your exact approved name)\n3) Language must match (usually en or en_US)\n4) Status must be Approved`
         : "";
       alert(
         [
-          `WhatsApp exam_report sent: ${sent}/${recipients.length}`,
+          `WhatsApp ${MOCK_RESULT_WA_TEMPLATE} sent: ${sent}/${recipients.length}`,
           failed ? `Failed: ${failed}` : null,
           skippedStaff ? `Skipped trainer/admin: ${skippedStaff}` : null,
           skippedNoPhone ? `Skipped (no phone): ${skippedNoPhone}` : null,
           firstError || null,
+          templateHint || null,
         ]
           .filter(Boolean)
           .join("\n")

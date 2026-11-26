@@ -13,6 +13,14 @@ import {
   resolveMockPublicAssignment,
   writeMockPublicSession,
 } from "@/lib/mockTestPublicLinks";
+import {
+  pickResumeProgress,
+  readMockTestProgress,
+} from "@/lib/mockTestProgress";
+import {
+  fetchMockTestAccountBlock,
+  isMockTestAccountBlocked,
+} from "@/lib/mockTests";
 
 const emptyForm = {
   name: "",
@@ -38,6 +46,7 @@ export default function MockTestPublicJoinPage() {
   const [acceptedRules, setAcceptedRules] = useState(false);
   const [starting, setStarting] = useState(false);
   const [doneMessage, setDoneMessage] = useState("");
+  const [resumeInfo, setResumeInfo] = useState(null);
 
   const mode = useMemo(() => getMockPublicLinkMode(link), [link]);
   const testCount = Array.isArray(link?.testIds) ? link.testIds.length : 0;
@@ -72,6 +81,31 @@ export default function MockTestPublicJoinPage() {
           });
           setPhoneVerified(true);
           setOtpSent(true);
+
+          const phone = normalizeMockPublicPhone(existing.phone);
+          const companySlug = String(existing.companySlug || data.companySlug || "").trim();
+          const testId = String(existing.testId || "").trim();
+          if (companySlug && testId && phone) {
+            try {
+              const block = await fetchMockTestAccountBlock(companySlug, testId, phone);
+              const progress = pickResumeProgress(
+                readMockTestProgress(companySlug, testId, phone),
+                block
+              );
+              if (progress || isMockTestAccountBlocked(block)) {
+                setResumeInfo({
+                  companySlug,
+                  testId,
+                  testTitle: existing.testTitle || "Mock Test",
+                  blocked: isMockTestAccountBlocked(block),
+                  hasProgress: Boolean(progress),
+                  reason: block?.reason || "",
+                });
+              }
+            } catch (resumeErr) {
+              console.warn("Could not check resume status:", resumeErr);
+            }
+          }
         }
       } catch (e) {
         console.error(e);
@@ -259,6 +293,50 @@ export default function MockTestPublicJoinPage() {
             {error ? (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
                 {error}
+              </div>
+            ) : null}
+
+            {resumeInfo ? (
+              <div
+                className={`rounded-xl border px-4 py-3 text-sm ${
+                  resumeInfo.blocked
+                    ? "border-amber-200 bg-amber-50 text-amber-950"
+                    : "border-sky-200 bg-sky-50 text-sky-950"
+                }`}
+              >
+                {resumeInfo.blocked ? (
+                  <>
+                    <p className="font-semibold">Your attempt is locked</p>
+                    <p className="mt-1">
+                      {resumeInfo.reason ||
+                        "Ask an admin to unlock your account. Your answers are saved."}
+                    </p>
+                    <p className="mt-1">
+                      After unlock, open the test again and choose <strong>Resume Test</strong> —
+                      you will continue from where you stopped, not from the start.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-semibold">Saved attempt found</p>
+                    <p className="mt-1">
+                      You have an unfinished attempt for{" "}
+                      <strong>{resumeInfo.testTitle}</strong>. Resume to continue from the same
+                      question — not from the beginning.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        router.push(
+                          `/mock-test/${encodeURIComponent(resumeInfo.companySlug)}/${encodeURIComponent(resumeInfo.testId)}?public=1&link=${encodeURIComponent(String(linkId))}`
+                        );
+                      }}
+                      className="mt-3 px-4 py-2 rounded-xl bg-[#00448a] text-white text-sm font-semibold hover:bg-[#003a76]"
+                    >
+                      Resume test
+                    </button>
+                  </>
+                )}
               </div>
             ) : null}
 
