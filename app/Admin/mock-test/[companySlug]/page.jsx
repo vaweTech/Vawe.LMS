@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -444,6 +444,11 @@ export default function AdminMockTestCompanyPage() {
   const [creatingLink, setCreatingLink] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState("");
   const [linkOrigin, setLinkOrigin] = useState("");
+  const [autoSaveStatus, setAutoSaveStatus] = useState("idle");
+  const autoSaveReadyRef = useRef(false);
+  const autoSaveTimerRef = useRef(null);
+  const persistInFlightRef = useRef(false);
+  const suppressAutoSaveUntilRef = useRef(0);
 
   const mcqDrafts = useMemo(
     () => questionDrafts.filter((q) => (q?.type || "mcq") === "mcq"),
@@ -480,8 +485,16 @@ export default function AdminMockTestCompanyPage() {
 
   const sectionSubSectionNames = useMemo(() => {
     if (activeSectionScope === SCOPE_ALL || activeSectionScope === SCOPE_UNASSIGNED) return [];
-    return collectSubSectionsForSection(activeSectionScope, sectionMap, questionDrafts);
-  }, [activeSectionScope, sectionMap, questionDrafts]);
+    const all = collectSubSectionsForSection(activeSectionScope, sectionMap, questionDrafts);
+    return all.filter((sub) => {
+      if (sub === activeMcqSubScope) return true;
+      return questionDrafts.some(
+        (q) =>
+          String(q.section || "").trim() === activeSectionScope &&
+          getMockQuestionSubSection(q) === sub
+      );
+    });
+  }, [activeSectionScope, sectionMap, questionDrafts, activeMcqSubScope]);
 
   const hasMcqUnassignedSection = useMemo(
     () => hasUnassignedSections(mcqDrafts),
@@ -545,6 +558,12 @@ export default function AdminMockTestCompanyPage() {
   );
 
   function closeQuestionEditor() {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    autoSaveReadyRef.current = false;
+    setAutoSaveStatus("idle");
     setQuestionEditId(null);
     setQuestionDrafts([]);
     setSectionMap({});
@@ -574,6 +593,81 @@ export default function AdminMockTestCompanyPage() {
         [sec]: moveListItem(current, index, direction),
       };
     });
+  }
+
+  function removeSection(sec) {
+    const name = String(sec || "").trim();
+    if (!name) return;
+    const linkedCount = questionDrafts.filter(
+      (q) => String(q.section || "").trim() === name
+    ).length;
+    const msg =
+      linkedCount > 0
+        ? `Remove section "${name}"?\n${linkedCount} question(s) will become unassigned. Save the test to keep this change.`
+        : `Remove section "${name}"?`;
+    if (!confirm(msg)) return;
+
+    setSectionMap((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+    setSectionOrder((prev) => prev.filter((s) => s !== name));
+    setSectionTimings((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+    setSubSectionTimings((prev) => {
+      const next = { ...prev };
+      const prefix = `${name}||`;
+      Object.keys(next).forEach((key) => {
+        if (key === name || key.startsWith(prefix)) delete next[key];
+      });
+      return next;
+    });
+    setQuestionDrafts((prev) =>
+      prev.map((q) => {
+        if (String(q.section || "").trim() !== name) return q;
+        return { ...q, section: "", subSection: "", subsection: "" };
+      })
+    );
+    if (activeSectionScope === name) setActiveSectionScope(SCOPE_ALL);
+    if (newSubSectionParent === name) setNewSubSectionParent("");
+  }
+
+  function removeSubSection(sec, sub) {
+    const section = String(sec || "").trim();
+    const name = String(sub || "").trim();
+    if (!section || !name) return;
+    const linkedCount = questionDrafts.filter(
+      (q) =>
+        String(q.section || "").trim() === section &&
+        getMockQuestionSubSection(q) === name
+    ).length;
+    const msg =
+      linkedCount > 0
+        ? `Remove sub-section "${name}" from "${section}"?\n${linkedCount} question(s) will lose this sub-section. Save the test to keep this change.`
+        : `Remove sub-section "${name}" from "${section}"?`;
+    if (!confirm(msg)) return;
+
+    setSectionMap((prev) => ({
+      ...prev,
+      [section]: (prev[section] || []).filter((s) => s !== name),
+    }));
+    setSubSectionTimings((prev) => {
+      const next = { ...prev };
+      delete next[mockSubSectionTimingKey(section, name)];
+      return next;
+    });
+    setQuestionDrafts((prev) =>
+      prev.map((q) => {
+        if (String(q.section || "").trim() !== section) return q;
+        if (getMockQuestionSubSection(q) !== name) return q;
+        return { ...q, subSection: "", subsection: "" };
+      })
+    );
+    if (activeMcqSubScope === name) setActiveMcqSubScope(SCOPE_ALL);
   }
 
   const companyLabel = getMockTestCompanyLabel(companySlug, group ? [group] : undefined);
@@ -842,7 +936,13 @@ export default function AdminMockTestCompanyPage() {
   }
 
   async function openQuestionEditor(testId) {
+    autoSaveReadyRef.current = false;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     setSaving(true);
+    setAutoSaveStatus("idle");
     try {
       const test = await fetchMockTest(companySlug, testId);
       setQuestionEditId(testId);
@@ -915,8 +1015,12 @@ export default function AdminMockTestCompanyPage() {
         syncSectionTimingsFromSubSections(test?.sectionTimings, loadedSubs, sectionToSubs)
       );
       setUploadInfo("");
+      setAutoSaveStatus("idle");
+      suppressAutoSaveUntilRef.current = Date.now() + 800;
+      autoSaveReadyRef.current = true;
     } catch (err) {
       alert(err?.message || "Failed to load questions.");
+      autoSaveReadyRef.current = false;
     } finally {
       setSaving(false);
     }
@@ -1084,57 +1188,168 @@ export default function AdminMockTestCompanyPage() {
     );
   }
 
-  async function saveQuestions() {
-    if (!questionEditId) return;
-    const cleaned = sanitizeMockQuestions(questionDrafts);
+  async function persistQuestions({
+    closeAfter = false,
+    silent = true,
+    draftsOverride = null,
+    sectionMapOverride = null,
+    sectionOrderOverride = null,
+    sectionTimingsOverride = null,
+    subSectionTimingsOverride = null,
+  } = {}) {
+    if (!questionEditId || persistInFlightRef.current) return false;
+    const drafts = draftsOverride ?? questionDrafts;
+    const map = sectionMapOverride ?? sectionMap;
+    const order = sectionOrderOverride ?? sectionOrder;
+    const secTimings = sectionTimingsOverride ?? sectionTimings;
+    const subTimings = subSectionTimingsOverride ?? subSectionTimings;
+    const cleaned = sanitizeMockQuestions(drafts);
     if (!cleaned.length) {
-      alert("Add at least one valid question.");
-      return;
+      if (!silent) alert("Add at least one valid question.");
+      return false;
     }
+    persistInFlightRef.current = true;
     setSaving(true);
+    setAutoSaveStatus("saving");
     try {
       const sectionToSubs = {};
-      Object.keys(sectionMap || {}).forEach((sec) => {
-        sectionToSubs[sec] = collectSubSectionsForSection(sec, sectionMap, cleaned);
+      Object.keys(map || {}).forEach((sec) => {
+        sectionToSubs[sec] = collectSubSectionsForSection(sec, map, cleaned);
       });
-      const cleanedSubs = normalizeMockSubSectionTimings(subSectionTimings);
+      const cleanedSubs = normalizeMockSubSectionTimings(subTimings);
       const cleanedSections = syncSectionTimingsFromSubSections(
-        sectionTimings,
+        secTimings,
         cleanedSubs,
         sectionToSubs
       );
       const knownSecs = Array.from(
         new Set([
-          ...Object.keys(sectionMap || {}),
+          ...Object.keys(map || {}),
           ...cleaned.map((q) => String(q.section || "").trim()).filter(Boolean),
         ])
       );
-      const cleanedSectionOrder = normalizeMockSectionOrder(sectionOrder, knownSecs);
+      const cleanedSectionOrder = normalizeMockSectionOrder(order, knownSecs);
       const cleanedSubSectionOrder = {};
       cleanedSectionOrder.forEach((sec) => {
-        const subs = collectSubSectionsForSection(sec, sectionMap, cleaned);
+        const subs = collectSubSectionsForSection(sec, map, cleaned);
         if (subs.length) cleanedSubSectionOrder[sec] = subs;
       });
+      const normalizedSubOrder = normalizeMockSubSectionOrder(cleanedSubSectionOrder);
       await updateMockTest(companySlug, questionEditId, {
         questions: cleaned,
         sectionTimings: cleanedSections,
         subSectionTimings: cleanedSubs,
         sectionOrder: cleanedSectionOrder,
-        subSectionOrder: normalizeMockSubSectionOrder(cleanedSubSectionOrder),
+        subSectionOrder: normalizedSubOrder,
       });
-      setQuestionEditId(null);
-      setQuestionDrafts([]);
-      setSectionOrder([]);
-      setSectionTimings({});
-      setSubSectionTimings({});
-      await loadData();
-      alert("Questions saved.");
+      setTests((prev) =>
+        prev.map((t) =>
+          t.id === questionEditId
+            ? {
+                ...t,
+                questions: cleaned,
+                sectionTimings: cleanedSections,
+                subSectionTimings: cleanedSubs,
+                sectionOrder: cleanedSectionOrder,
+                subSectionOrder: normalizedSubOrder,
+              }
+            : t
+        )
+      );
+      if (closeAfter) {
+        closeQuestionEditor();
+        await loadData();
+        if (!silent) alert("Questions saved.");
+      } else {
+        setAutoSaveStatus("saved");
+        suppressAutoSaveUntilRef.current = Date.now() + 600;
+      }
+      return true;
     } catch (err) {
-      alert(err?.message || "Failed to save questions.");
+      setAutoSaveStatus("error");
+      if (!silent) alert(err?.message || "Failed to save questions.");
+      return false;
     } finally {
+      persistInFlightRef.current = false;
       setSaving(false);
     }
   }
+
+  function saveQuestions() {
+    void persistQuestions({ closeAfter: false, silent: false });
+  }
+
+  function moveQuestionPlacement(draftId, nextSectionRaw, nextSubRaw, { resetSub = false } = {}) {
+    const nextSection = String(nextSectionRaw || "").trim();
+    const nextSub = resetSub ? "" : String(nextSubRaw || "").trim();
+    const nextDrafts = questionDrafts.map((q) =>
+      q.draftId === draftId
+        ? { ...q, section: nextSection, subSection: nextSub, subsection: nextSub }
+        : q
+    );
+    const nextMap = { ...sectionMap };
+    if (nextSection) {
+      const existing = Array.isArray(nextMap[nextSection]) ? nextMap[nextSection] : [];
+      nextMap[nextSection] = nextSub
+        ? Array.from(new Set([...existing, nextSub]))
+        : existing;
+    }
+    const nextOrder = nextSection
+      ? sectionOrder.includes(nextSection)
+        ? sectionOrder
+        : [...sectionOrder, nextSection]
+      : sectionOrder;
+
+    setQuestionDrafts(nextDrafts);
+    setSectionMap(nextMap);
+    if (nextSection && !sectionOrder.includes(nextSection)) {
+      setSectionOrder(nextOrder);
+    }
+
+    if (nextSection) {
+      setActiveSectionScope(nextSection);
+      setActiveMcqSubScope(nextSub || SCOPE_ALL);
+    } else {
+      setActiveSectionScope(SCOPE_UNASSIGNED);
+      setActiveMcqSubScope(SCOPE_ALL);
+    }
+
+    suppressAutoSaveUntilRef.current = Date.now() + 1500;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    void persistQuestions({
+      closeAfter: false,
+      silent: true,
+      draftsOverride: nextDrafts,
+      sectionMapOverride: nextMap,
+      sectionOrderOverride: nextOrder,
+    });
+  }
+
+  useEffect(() => {
+    if (!questionEditId || !autoSaveReadyRef.current) return;
+    if (Date.now() < suppressAutoSaveUntilRef.current) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    setAutoSaveStatus((prev) => (prev === "saving" ? prev : "dirty"));
+    autoSaveTimerRef.current = setTimeout(() => {
+      if (!autoSaveReadyRef.current) return;
+      if (Date.now() < suppressAutoSaveUntilRef.current) return;
+      void persistQuestions({ closeAfter: false, silent: true });
+    }, 1200);
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce draft/timing edits only
+  }, [
+    questionDrafts,
+    sectionMap,
+    sectionOrder,
+    sectionTimings,
+    subSectionTimings,
+    questionEditId,
+  ]);
 
   function applyUploadedQuestions(questions, mode = "append") {
     const incoming = sanitizeMockQuestions(questions).map((q, idx) => {
@@ -2119,6 +2334,15 @@ export default function AdminMockTestCompanyPage() {
                     <p className="text-sm text-slate-500 mt-0.5">
                       {mcqDrafts.length} MCQ · {codingDrafts.length} Coding ·{" "}
                       {editingTest?.durationMinutes || 60} min
+                      {autoSaveStatus === "saving" ? (
+                        <span className="ml-2 text-amber-600">· Saving…</span>
+                      ) : autoSaveStatus === "saved" ? (
+                        <span className="ml-2 text-emerald-600">· Saved</span>
+                      ) : autoSaveStatus === "dirty" ? (
+                        <span className="ml-2 text-slate-400">· Unsaved changes</span>
+                      ) : autoSaveStatus === "error" ? (
+                        <span className="ml-2 text-red-600">· Save failed</span>
+                      ) : null}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -2144,7 +2368,7 @@ export default function AdminMockTestCompanyPage() {
                       className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#00448a] text-white text-sm font-semibold hover:bg-[#003a76] disabled:opacity-60 shadow-sm"
                     >
                       <Save className="h-4 w-4" />
-                      Save
+                      {saving ? "Saving…" : "Save"}
                     </button>
                     <button
                       type="button"
@@ -2376,6 +2600,15 @@ export default function AdminMockTestCompanyPage() {
                                               Section time for this whole section
                                             </span>
                                           ) : null}
+                                          <button
+                                            type="button"
+                                            onClick={() => removeSection(sec)}
+                                            className="ml-auto inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-lg border border-red-200 text-red-700 bg-white hover:bg-red-50"
+                                            title="Remove section"
+                                          >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Remove
+                                          </button>
                                         </div>
                                         {subs.length > 0 ? (
                                           <div className="mt-2 grid sm:grid-cols-2 gap-2 pl-0 sm:pl-2">
@@ -2411,40 +2644,50 @@ export default function AdminMockTestCompanyPage() {
                                                       {sub}
                                                     </span>
                                                   </div>
-                                                  <label className="flex items-center gap-1.5 shrink-0">
-                                                    <span className="text-slate-500">min</span>
-                                                    <input
-                                                      type="number"
-                                                      min={0}
-                                                      value={subSectionTimings[key] ?? ""}
-                                                      onChange={(e) => {
-                                                        const v = e.target.value;
-                                                        setSubSectionTimings((prev) => {
-                                                          const next = { ...prev };
-                                                          if (v === "" || Number(v) <= 0) {
-                                                            delete next[key];
-                                                          } else {
-                                                            next[key] = Number(v);
-                                                          }
-                                                          const sum =
-                                                            sumMockSubSectionTimingsForSection(
-                                                              sec,
-                                                              next,
-                                                              subs
-                                                            );
-                                                          setSectionTimings((prevSec) => {
-                                                            const secNext = { ...prevSec };
-                                                            if (sum > 0) secNext[sec] = sum;
-                                                            else delete secNext[sec];
-                                                            return secNext;
+                                                  <div className="flex items-center gap-1.5 shrink-0">
+                                                    <label className="flex items-center gap-1.5">
+                                                      <span className="text-slate-500">min</span>
+                                                      <input
+                                                        type="number"
+                                                        min={0}
+                                                        value={subSectionTimings[key] ?? ""}
+                                                        onChange={(e) => {
+                                                          const v = e.target.value;
+                                                          setSubSectionTimings((prev) => {
+                                                            const next = { ...prev };
+                                                            if (v === "" || Number(v) <= 0) {
+                                                              delete next[key];
+                                                            } else {
+                                                              next[key] = Number(v);
+                                                            }
+                                                            const sum =
+                                                              sumMockSubSectionTimingsForSection(
+                                                                sec,
+                                                                next,
+                                                                subs
+                                                              );
+                                                            setSectionTimings((prevSec) => {
+                                                              const secNext = { ...prevSec };
+                                                              if (sum > 0) secNext[sec] = sum;
+                                                              else delete secNext[sec];
+                                                              return secNext;
+                                                            });
+                                                            return next;
                                                           });
-                                                          return next;
-                                                        });
-                                                      }}
-                                                      placeholder="—"
-                                                      className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm bg-white"
-                                                    />
-                                                  </label>
+                                                        }}
+                                                        placeholder="—"
+                                                        className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm bg-white"
+                                                      />
+                                                    </label>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => removeSubSection(sec, sub)}
+                                                      className="p-1 rounded-md text-red-600 hover:bg-red-50"
+                                                      title="Remove sub-section"
+                                                    >
+                                                      <Trash2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                  </div>
                                                 </div>
                                               );
                                             })}
@@ -2475,6 +2718,7 @@ export default function AdminMockTestCompanyPage() {
                             </div>
                           )}
 
+                          {visibleMcqs.length > 0 ? (
                           <div className="mb-8">
                               <div className="flex items-center justify-between mb-3 mt-2">
                                 <h3 className="text-base font-semibold text-gray-900">
@@ -2496,13 +2740,15 @@ export default function AdminMockTestCompanyPage() {
                                         <select
                                           value={String(q.section || "").trim()}
                                           onChange={(e) =>
-                                            updateQuestionDraftById(q.draftId, {
-                                              section: e.target.value,
-                                              subSection: "",
-                                            })
+                                            moveQuestionPlacement(
+                                              q.draftId,
+                                              e.target.value,
+                                              "",
+                                              { resetSub: true }
+                                            )
                                           }
                                           className="text-xs border rounded px-2 py-1 bg-white"
-                                          title="Section"
+                                          title="Move to section"
                                         >
                                           <option value="">Unassigned</option>
                                           {allSectionNames.map((name) => (
@@ -2514,12 +2760,14 @@ export default function AdminMockTestCompanyPage() {
                                         <select
                                           value={getMockQuestionSubSection(q)}
                                           onChange={(e) =>
-                                            updateQuestionDraftById(q.draftId, {
-                                              subSection: e.target.value,
-                                            })
+                                            moveQuestionPlacement(
+                                              q.draftId,
+                                              q.section,
+                                              e.target.value
+                                            )
                                           }
                                           className="text-xs border rounded px-2 py-1 bg-white"
-                                          title="Sub-section"
+                                          title="Move to sub-section"
                                           disabled={!String(q.section || "").trim()}
                                         >
                                           <option value="">Unassigned</option>
@@ -2649,7 +2897,9 @@ export default function AdminMockTestCompanyPage() {
                                 ))}
                               </div>
                             </div>
+                          ) : null}
 
+                          {visibleCoding.length > 0 ? (
                           <div className="mb-8">
                               <div className="flex items-center justify-between mb-3 mt-2">
                                 <h3 className="text-base font-semibold text-gray-900">
@@ -2674,13 +2924,15 @@ export default function AdminMockTestCompanyPage() {
                                         <select
                                           value={String(q.section || "").trim()}
                                           onChange={(e) =>
-                                            updateQuestionDraftById(q.draftId, {
-                                              section: e.target.value,
-                                              subSection: "",
-                                            })
+                                            moveQuestionPlacement(
+                                              q.draftId,
+                                              e.target.value,
+                                              "",
+                                              { resetSub: true }
+                                            )
                                           }
                                           className="text-xs border rounded px-2 py-1 bg-white"
-                                          title="Section"
+                                          title="Move to section"
                                         >
                                           <option value="">Unassigned</option>
                                           {allSectionNames.map((name) => (
@@ -2692,12 +2944,14 @@ export default function AdminMockTestCompanyPage() {
                                         <select
                                           value={getMockQuestionSubSection(q)}
                                           onChange={(e) =>
-                                            updateQuestionDraftById(q.draftId, {
-                                              subSection: e.target.value,
-                                            })
+                                            moveQuestionPlacement(
+                                              q.draftId,
+                                              q.section,
+                                              e.target.value
+                                            )
                                           }
                                           className="text-xs border rounded px-2 py-1 bg-white"
-                                          title="Sub-section (e.g. Easy, Hard)"
+                                          title="Move to sub-section"
                                           disabled={!String(q.section || "").trim()}
                                         >
                                           <option value="">Unassigned</option>
@@ -2821,10 +3075,11 @@ export default function AdminMockTestCompanyPage() {
                                 ))}
                               </div>
                             </div>
+                          ) : null}
 
                           {visibleMcqs.length === 0 && visibleCoding.length === 0 && (
                             <p className="text-sm text-gray-500 py-6 text-center">
-                              No questions in this section yet. Choose a type and click Add question.
+                              No questions in this selection yet. Choose a type and click Add question.
                             </p>
                           )}
               </div>
