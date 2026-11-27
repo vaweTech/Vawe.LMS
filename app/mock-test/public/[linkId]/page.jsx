@@ -459,6 +459,10 @@ export default function MockTestPublicJoinPage() {
                 </li>
                 <li>Do not switch tabs; repeated switches may block the attempt.</li>
                 <li>
+                  Keep the test page open — the screen is kept on during the exam so it does not
+                  turn off or sleep.
+                </li>
+                <li>
                   Coding questions appear last as sub-sections (e.g. Coding Easy / Coding Hard). The
                   first two test cases are public samples; any remaining cases are hidden for
                   scoring.

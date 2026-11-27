@@ -1967,6 +1967,7 @@ function TakeMockTestPage() {
                   <li>
                     Fullscreen is required (Chrome / desktop). Do not leave this tab — leaving the
                     page shows a warning. After <strong>3 tab switches</strong> the test is blocked.
+                    The screen is kept on during the test so it does not turn off or sleep.
                   </li>
                   <li>Copying question text is not allowed.</li>
                   {timingEnabled ? (
