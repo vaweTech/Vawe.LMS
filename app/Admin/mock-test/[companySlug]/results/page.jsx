@@ -566,10 +566,17 @@ function ResultsInner() {
       alert("No results to download.");
       return;
     }
+    let phoneByKey = new Map();
+    try {
+      phoneByKey = await resolveRecipientsForRows(rows);
+    } catch (e) {
+      console.warn("Could not resolve student phones for Excel export:", e);
+    }
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Results");
     ws.addRow([
       "Name",
+      "Mobile",
       "Email",
       "Test",
       "MCQ",
@@ -582,8 +589,15 @@ function ResultsInner() {
     rows.forEach((r) => {
       const bySection = sectionScoresForRow(r);
       const bySub = subSectionScoresForRow(r);
+      const key = String(r.userId || r.id || r.email || r.phone || "");
+      const info = phoneByKey.get(key);
+      const mobile =
+        String(info?.phone || "").trim() ||
+        pickSubmissionPhone(r) ||
+        String(r.phone || "").trim();
       ws.addRow([
         r.name || "",
+        mobile,
         r.email || "",
         r.testTitle || r.testId,
         `${r.mcqCorrect ?? 0}/${r.mcqTotal ?? 0}`,
