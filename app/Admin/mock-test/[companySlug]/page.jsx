@@ -52,6 +52,7 @@ import {
   ChevronUp,
   Clock,
   Code2,
+  Download,
   FileQuestion,
   Link2,
   ListChecks,
@@ -71,6 +72,84 @@ import {
 
 const SCOPE_ALL = "__ALL__";
 const SCOPE_UNASSIGNED = "__UNASSIGNED__";
+
+const LOCKED_EXPORT_FIELDS = [
+  { key: "name", label: "Name" },
+  { key: "mobile", label: "Mobile number" },
+  { key: "email", label: "Email" },
+  { key: "userId", label: "User / account ID" },
+  { key: "college", label: "College" },
+  { key: "branch", label: "Branch" },
+  { key: "reason", label: "Lock reason" },
+  { key: "tabSwitchCount", label: "Tab switch count" },
+  { key: "blockedAt", label: "Locked date & time" },
+  { key: "testTitle", label: "Test title" },
+];
+
+const DEFAULT_LOCKED_EXPORT_FIELDS = {
+  name: true,
+  mobile: true,
+  email: false,
+  userId: false,
+  college: false,
+  branch: false,
+  reason: false,
+  tabSwitchCount: false,
+  blockedAt: false,
+  testTitle: false,
+};
+
+function lockedAccountMobile(account) {
+  const direct = String(account?.phone || "").replace(/\D/g, "");
+  if (direct.length >= 10) return direct.slice(-10);
+  const uid = String(account?.userId || account?.id || "").replace(/\D/g, "");
+  if (uid.length >= 10) return uid.slice(-10);
+  return String(account?.phone || "").trim();
+}
+
+function lockedAccountCollege(account) {
+  return String(
+    account?.college || account?.progress?.college || ""
+  ).trim();
+}
+
+function lockedAccountBranch(account) {
+  return String(account?.branch || account?.progress?.branch || "").trim();
+}
+
+function formatLockedAtForCsv(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function lockedAccountExportValue(account, fieldKey, testTitle = "") {
+  switch (fieldKey) {
+    case "name":
+      return String(account?.name || "").trim();
+    case "mobile":
+      return lockedAccountMobile(account);
+    case "email":
+      return String(account?.email || "").trim();
+    case "userId":
+      return String(account?.userId || account?.id || "").trim();
+    case "college":
+      return lockedAccountCollege(account);
+    case "branch":
+      return lockedAccountBranch(account);
+    case "reason":
+      return String(account?.reason || "Locked after tab switches").trim();
+    case "tabSwitchCount":
+      return String(account?.tabSwitchCount ?? "");
+    case "blockedAt":
+      return formatLockedAtForCsv(account?.blockedAt);
+    case "testTitle":
+      return String(testTitle || account?.testTitle || "").trim();
+    default:
+      return "";
+  }
+}
 
 const emptyTestForm = {
   title: "",
@@ -414,6 +493,11 @@ export default function AdminMockTestCompanyPage() {
   const [lockedAccountsByTest, setLockedAccountsByTest] = useState({});
   const [unlockingAccountKey, setUnlockingAccountKey] = useState("");
   const [lockedAccountsModalTestId, setLockedAccountsModalTestId] = useState(null);
+  const [lockedAccountSearch, setLockedAccountSearch] = useState("");
+  const [lockedAccountDateFrom, setLockedAccountDateFrom] = useState("");
+  const [lockedAccountDateTo, setLockedAccountDateTo] = useState("");
+  const [lockedExportFields, setLockedExportFields] = useState(DEFAULT_LOCKED_EXPORT_FIELDS);
+  const [showLockedExportOptions, setShowLockedExportOptions] = useState(false);
   const [testForm, setTestForm] = useState(emptyTestForm);
   const [editingTestId, setEditingTestId] = useState(null);
   const [editMeta, setEditMeta] = useState(emptyTestForm);
@@ -933,6 +1017,45 @@ export default function AdminMockTestCompanyPage() {
     } finally {
       setUnlockingAccountKey("");
     }
+  }
+
+  function downloadLockedAccountsCsv(accounts, testTitle = "") {
+    const selectedFields = LOCKED_EXPORT_FIELDS.filter((f) => lockedExportFields[f.key]);
+    if (!selectedFields.length) {
+      alert("Select at least one field for the CSV download.");
+      return;
+    }
+    const list = Array.isArray(accounts) ? accounts : [];
+    if (!list.length) {
+      alert("No locked students to download.");
+      return;
+    }
+    const headers = selectedFields.map((f) => f.label);
+    const rows = list.map((account) =>
+      selectedFields.map((f) =>
+        lockedAccountExportValue(account, f.key, testTitle)
+      )
+    );
+    const csv = Papa.unparse({ fields: headers, data: rows });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const slug = String(testTitle || companySlug || "test")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    a.href = url;
+    a.download = `locked-students-${slug || "test"}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function resetLockedModalFilters() {
+    setLockedAccountSearch("");
+    setLockedAccountDateFrom("");
+    setLockedAccountDateTo("");
+    setLockedExportFields(DEFAULT_LOCKED_EXPORT_FIELDS);
+    setShowLockedExportOptions(false);
   }
 
   async function openQuestionEditor(testId) {
@@ -1685,13 +1808,52 @@ export default function AdminMockTestCompanyPage() {
       {lockedAccountsModalTestId ? (() => {
         const modalTest = tests.find((t) => t.id === lockedAccountsModalTestId);
         const modalAccounts = lockedAccountsByTest[lockedAccountsModalTestId] || [];
+        const searchQ = lockedAccountSearch.trim().toLowerCase();
+        const fromDay = lockedAccountDateFrom
+          ? new Date(`${lockedAccountDateFrom}T00:00:00`)
+          : null;
+        const toDay = lockedAccountDateTo
+          ? new Date(`${lockedAccountDateTo}T23:59:59.999`)
+          : null;
+        const filteredLockedAccounts = modalAccounts.filter((account) => {
+          if (searchQ) {
+            const hay = [
+              account.name,
+              account.email,
+              account.userId,
+              account.id,
+              account.phone,
+              lockedAccountMobile(account),
+              account.college,
+              account.branch,
+              account.reason,
+            ]
+              .map((v) => String(v || "").toLowerCase())
+              .join(" ");
+            if (!hay.includes(searchQ)) return false;
+          }
+          if (fromDay || toDay) {
+            const lockedAt = account.blockedAt ? new Date(account.blockedAt) : null;
+            if (!lockedAt || Number.isNaN(lockedAt.getTime())) return false;
+            if (fromDay && lockedAt < fromDay) return false;
+            if (toDay && lockedAt > toDay) return false;
+          }
+          return true;
+        });
+        const closeLockedModal = () => {
+          setLockedAccountsModalTestId(null);
+          resetLockedModalFilters();
+        };
+        const selectedExportCount = LOCKED_EXPORT_FIELDS.filter(
+          (f) => lockedExportFields[f.key]
+        ).length;
         return (
           <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/50">
             <div
               role="dialog"
               aria-modal="true"
               aria-labelledby="locked-accounts-title"
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[85vh] flex flex-col overflow-hidden"
             >
               <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -1699,39 +1861,193 @@ export default function AdminMockTestCompanyPage() {
                     Locked accounts
                   </h2>
                   <p className="text-sm text-slate-500 mt-0.5 truncate">
-                    {modalTest?.title || "This test"} · {modalAccounts.length} locked
+                    {modalTest?.title || "This test"} ·{" "}
+                    {lockedAccountSearch || lockedAccountDateFrom || lockedAccountDateTo
+                      ? `${filteredLockedAccounts.length} of ${modalAccounts.length} locked`
+                      : `${modalAccounts.length} locked`}
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setLockedAccountsModalTestId(null)}
+                  onClick={closeLockedModal}
                   className="p-2 rounded-lg hover:bg-slate-100 text-slate-500"
                   aria-label="Close"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
+              {modalAccounts.length > 0 ? (
+                <div className="px-5 py-3 border-b border-slate-100 space-y-2 bg-slate-50/80">
+                  <input
+                    type="search"
+                    value={lockedAccountSearch}
+                    onChange={(e) => setLockedAccountSearch(e.target.value)}
+                    placeholder="Search name, email, phone, or reason…"
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a]"
+                  />
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="flex-1 min-w-[120px]">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                        From date
+                      </span>
+                      <input
+                        type="date"
+                        value={lockedAccountDateFrom}
+                        onChange={(e) => setLockedAccountDateFrom(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a]"
+                      />
+                    </label>
+                    <label className="flex-1 min-w-[120px]">
+                      <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                        To date
+                      </span>
+                      <input
+                        type="date"
+                        value={lockedAccountDateTo}
+                        onChange={(e) => setLockedAccountDateTo(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#00448a]/20 focus:border-[#00448a]"
+                      />
+                    </label>
+                    {lockedAccountSearch || lockedAccountDateFrom || lockedAccountDateTo ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLockedAccountSearch("");
+                          setLockedAccountDateFrom("");
+                          setLockedAccountDateTo("");
+                        }}
+                        className="h-[38px] px-3 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-600 hover:bg-slate-50"
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowLockedExportOptions((v) => !v)}
+                        className="text-xs font-semibold text-slate-700 hover:text-[#00448a]"
+                      >
+                        {showLockedExportOptions ? "Hide" : "Show"} CSV fields checklist
+                        <span className="ml-1 font-normal text-slate-500">
+                          ({selectedExportCount} selected)
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          downloadLockedAccountsCsv(
+                            filteredLockedAccounts,
+                            modalTest?.title || ""
+                          )
+                        }
+                        disabled={!filteredLockedAccounts.length || selectedExportCount === 0}
+                        className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl bg-[#00448a] text-white text-xs font-semibold hover:bg-[#003a76] disabled:opacity-50"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download CSV
+                      </button>
+                    </div>
+                    {showLockedExportOptions ? (
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {LOCKED_EXPORT_FIELDS.map((field) => (
+                          <label
+                            key={field.key}
+                            className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-2 text-xs text-slate-800 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={Boolean(lockedExportFields[field.key])}
+                              onChange={(e) =>
+                                setLockedExportFields((prev) => ({
+                                  ...prev,
+                                  [field.key]: e.target.checked,
+                                }))
+                              }
+                              className="h-3.5 w-3.5 accent-[#00448a]"
+                            />
+                            {field.label}
+                          </label>
+                        ))}
+                        <div className="sm:col-span-2 flex flex-wrap gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setLockedExportFields(
+                                Object.fromEntries(
+                                  LOCKED_EXPORT_FIELDS.map((f) => [f.key, true])
+                                )
+                              )
+                            }
+                            className="text-[11px] font-medium text-[#00448a] hover:underline"
+                          >
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setLockedExportFields(DEFAULT_LOCKED_EXPORT_FIELDS)
+                            }
+                            className="text-[11px] font-medium text-slate-600 hover:underline"
+                          >
+                            Name + mobile only
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      Downloads the current filtered list. Default columns: Name + Mobile number.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
               <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
                 {modalAccounts.length === 0 ? (
                   <p className="p-6 text-sm text-slate-500 text-center">
                     No locked accounts for this test.
                   </p>
+                ) : filteredLockedAccounts.length === 0 ? (
+                  <p className="p-6 text-sm text-slate-500 text-center">
+                    No locked students match this search / date filter.
+                  </p>
                 ) : (
-                  modalAccounts.map((account) => {
+                  filteredLockedAccounts.map((account) => {
                     const accountId = String(account.userId || account.id || "");
                     const key = `${lockedAccountsModalTestId}:${accountId}`;
+                    const lockedAtLabel = account.blockedAt
+                      ? (() => {
+                          const d = new Date(account.blockedAt);
+                          return Number.isNaN(d.getTime())
+                            ? ""
+                            : d.toLocaleString(undefined, {
+                                dateStyle: "medium",
+                                timeStyle: "short",
+                              });
+                        })()
+                      : "";
                     return (
                       <div key={accountId} className="flex items-center gap-3 px-5 py-3">
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-semibold text-slate-900 truncate">
                             {account.name || account.email || accountId}
                           </p>
+                          {lockedAccountMobile(account) ? (
+                            <p className="text-xs text-slate-600 truncate">
+                              Mobile: {lockedAccountMobile(account)}
+                            </p>
+                          ) : null}
                           {account.email ? (
                             <p className="text-xs text-slate-500 truncate">{account.email}</p>
                           ) : null}
                           <p className="text-[11px] text-orange-700 mt-0.5 truncate">
                             {account.reason || "Locked after tab switches"}
                           </p>
+                          {lockedAtLabel ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              Locked on {lockedAtLabel}
+                            </p>
+                          ) : null}
                         </div>
                         <button
                           type="button"
@@ -2263,7 +2579,10 @@ export default function AdminMockTestCompanyPage() {
                                 />
                                 <button
                                   type="button"
-                                  onClick={() => setLockedAccountsModalTestId(test.id)}
+                                  onClick={() => {
+                                    resetLockedModalFilters();
+                                    setLockedAccountsModalTestId(test.id);
+                                  }}
                                   title="Locked accounts"
                                   className="inline-flex items-center justify-center gap-1 h-9 px-2.5 rounded-xl border border-orange-200 bg-orange-50 text-orange-800 text-sm font-medium hover:bg-orange-100"
                                 >

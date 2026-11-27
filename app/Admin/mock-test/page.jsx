@@ -180,9 +180,6 @@ export default function AdminMockTestGroupsPage() {
                   Create group
                 </button>
               </div>
-              <p className="text-[11px] text-slate-500 mt-2">
-                Slug is created automatically from the company name.
-              </p>
             </form>
 
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
